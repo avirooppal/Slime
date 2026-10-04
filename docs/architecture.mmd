@@ -1,0 +1,18 @@
+flowchart TD
+    subgraph P1["Phase 1 implemented"]
+        C["Explicit files / journal / metrics / health / changes"] --> S["Signals: Drain3 templates and robust anomalies"]
+        S --> DB[("SQLite event store")]
+        DB --> COR["Correlator: dependencies, windows, lifecycle"]
+    end
+    COR -.-> D1["D1 context memory"]
+    D1 --> D2["D2 rules and runbooks"]
+    D2 --> D5["Optional experimental Laya gate"]
+    D5 --> D3["D3 bounded local investigator and read-only tools"]
+    D3 --> D4["D4 optional redacted cloud fallback"]
+    D1 & D2 & D5 & D3 & D4 --> P["Planner: root cause and least blast radius"]
+    P --> SAFE["Deterministic safety gate and append-only audit"]
+    SAFE --> EXEC["Typed executor with immediate state recheck"]
+    EXEC --> VERIFY["Stability window and flap detection"]
+    VERIFY --> OUT["Resolve / rollback / escalate"]
+    OUT --> L["Context-aware verified learning and postmortems"]
+    L --> D1

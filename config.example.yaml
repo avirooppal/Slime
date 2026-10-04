@@ -1,0 +1,33 @@
+# Slime Phases 1–2: explicit inventory, dry-run by default.
+database: slime.db
+dry_run: true
+metrics_enabled: true
+disk_paths: [] # e.g. ["/"] on Linux, ["C:\\"] on Windows
+poll_seconds: 5
+correlation_seconds: 300
+stability_seconds: 120
+max_auto_targets: 1
+ollama_model: qwen2.5:3b-instruct
+maintenance: []
+safety:
+  minimum_confidence: 0.90
+  max_auto_per_hour: 5
+  cooldown_seconds: 300
+  failure_limit: 3
+  verification_interval_seconds: 5
+  verification_timeout_seconds: 300
+managed_files: [] # POSIX only; exact files, no recursive cleanup
+docker_images: {} # cleanup alias -> exact sha256 digest; requires approval
+services: []
+# Example service (replace paths and endpoints):
+# - name: web
+#   critical: true
+#   depends_on: [worker]
+#   logs: [/var/log/example/web.log]
+#   configs: [/etc/example/web.yaml]
+#   http_url: http://127.0.0.1:8080/health
+# - name: worker
+#   journal_unit: example-worker.service
+#   process_pid: 1234
+#   configs: [/var/lib/dpkg/status] # explicit package database fingerprint
+
