@@ -1,6 +1,7 @@
 """Tests for Phase 9: Localhost-Only FastAPI Dashboard and Security Constraints."""
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,7 +11,10 @@ from selfheal.config import Config, Service
 from selfheal.interface.cli import app as cli_app
 from selfheal.interface.dashboard import create_dashboard_app, run_dashboard
 from selfheal.models import Incident, State
+from selfheal.safety.contracts import Proposal
+from selfheal.safety.state import SafetyState, proposal_digest
 from selfheal.storage.store import Store
+from tests.safety_fakes import FakeBackend, FakeInventory
 
 
 def test_dashboard_endpoints(tmp_path: Path) -> None:
@@ -68,17 +72,15 @@ def test_dashboard_endpoints(tmp_path: Path) -> None:
     assert "D2 Runbooks" in tier_names
     assert "D3 Local LLM" in tier_names
 
-    # 5. /api/approvals & POST /api/approve
+    # 5. Approval endpoint is disabled unless the server has a session token.
     res_appr = client.get("/api/approvals")
     assert res_appr.status_code == 200
 
     res_post_appr = client.post(
         "/api/approve",
-        json={"proposal_id": "digest-12345", "actor": "alice"},
+        json={"proposal_id": "digest-12345"},
     )
-    assert res_post_appr.status_code == 200
-    assert res_post_appr.json()["status"] == "approved"
-    assert res_post_appr.json()["actor"] == "alice"
+    assert res_post_appr.status_code == 403
 
     # 6. /api/history
     res_hist = client.get("/api/history")
@@ -90,6 +92,53 @@ def test_dashboard_endpoints(tmp_path: Path) -> None:
     audit_data = res_audit.json()
     assert len(audit_data["audit"]) >= 1
 
+    store.close()
+
+
+def test_dashboard_approval_requires_token_origin_and_live_proposal(tmp_path: Path) -> None:
+    """A token cannot authorize an invented digest or a changed inventory revision."""
+    db_path = tmp_path / "secure.db"
+    store = Store(db_path)
+    config = Config(database=str(db_path), dry_run=True)
+    incident = Incident(id="review-1", state=State.ESCALATED, services=["worker"])
+    store.save_incident(incident)
+    inventory = FakeInventory()
+    backend = FakeBackend()
+    proposal = Proposal(
+        incident_id=incident.id,
+        name="rollback_to_previous_image",
+        params={"target": "container.worker", "previous_image": "sha256:" + "a" * 64},
+        expected_revision=inventory.live.revision,
+        confidence=0.95,
+    )
+    state = SafetyState(store)
+    state.stage_pending(proposal)
+    with patch("selfheal.interface.dashboard.NativeInventory", return_value=inventory), patch(
+        "selfheal.interface.dashboard.NativeBackend", return_value=backend
+    ):
+        client = TestClient(create_dashboard_app(config, store, approval_token="a-long-random-token"))
+        pending = client.get("/api/approvals").json()["approvals"]
+        assert pending[0]["proposal_id"] == proposal_digest(proposal)
+        route = "/api/approve"
+        payload = {"proposal_id": proposal_digest(proposal)}
+        headers = {"origin": "http://testserver", "authorization": "Bearer a-long-random-token"}
+        assert client.post(route, json=payload, headers={"origin": "http://testserver"}).status_code == 403
+        assert client.post(route, json=payload, headers={"authorization": headers["authorization"]}).status_code == 403
+        assert client.post(route, json=payload, headers={**headers, "origin": "http://evil.test"}).status_code == 403
+        assert client.post(route, json={"proposal_id": "0" * 64}, headers=headers).status_code == 404
+        inventory.live = inventory.live.__class__(
+            inventory.live.target, inventory.live.kind, inventory.live.identity,
+            "changed-revision", inventory.live.state, inventory.live.healthy,
+        )
+        assert client.post(route, json=payload, headers=headers).status_code == 409
+        inventory.live = inventory.live.__class__(
+            inventory.live.target, inventory.live.kind, inventory.live.identity,
+            proposal.expected_revision, inventory.live.state, inventory.live.healthy,
+        )
+        response = client.post(route, json=payload, headers=headers)
+        assert response.status_code == 200
+        assert state.approved(proposal)
+        assert not client.get("/api/approvals").json()["approvals"]
     store.close()
 
 

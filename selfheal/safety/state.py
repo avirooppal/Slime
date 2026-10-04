@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS approvals (
  consumed INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS action_receipts (
  action_id TEXT PRIMARY KEY REFERENCES actions(id), payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS pending_approvals (
+ digest TEXT PRIMARY KEY, proposal TEXT NOT NULL, created_at TEXT NOT NULL);
 """
 
 
@@ -120,6 +122,33 @@ class SafetyState:
                 ),
             )
             self.store.audit(proposal.incident_id, "human_approval", proposal_digest(proposal))
+
+    def stage_pending(self, proposal: Proposal) -> None:
+        """Persist only a policy-reviewed exact proposal for later human review."""
+        validated = Proposal.model_validate(proposal)
+        with self.transaction():
+            self.store.connection.execute(
+                "INSERT OR REPLACE INTO pending_approvals VALUES(?,?,?)",
+                (proposal_digest(validated), validated.model_dump_json(), self.now().isoformat()),
+            )
+            self.store.audit(validated.incident_id, "approval_requested", proposal_digest(validated))
+
+    def pending(self) -> list[tuple[str, Proposal]]:
+        """Return staged proposals; callers must recheck live policy before approving."""
+        cutoff = (self.now() - timedelta(seconds=300)).isoformat()
+        rows = self.store.connection.execute(
+            "SELECT digest,proposal FROM pending_approvals WHERE created_at>? ORDER BY created_at DESC",
+            (cutoff,),
+        ).fetchall()
+        return [(str(digest), Proposal.model_validate_json(payload)) for digest, payload in rows]
+
+    def pending_by_digest(self, digest: str) -> Proposal | None:
+        """Load an exact staged proposal without accepting caller-supplied parameters."""
+        row = self.store.connection.execute(
+            "SELECT proposal FROM pending_approvals WHERE digest=? AND created_at>?",
+            (digest, (self.now() - timedelta(seconds=300)).isoformat()),
+        ).fetchone()
+        return Proposal.model_validate_json(row[0]) if row else None
 
     def approved(self, proposal: Proposal) -> bool:
         """Check exact digest, expiry and consumption without trusting proposal fields."""

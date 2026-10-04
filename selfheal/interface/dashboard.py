@@ -1,12 +1,18 @@
 """Optional one-page localhost-only FastAPI dashboard for Slime Phase 9."""
 
-from datetime import timedelta
+import secrets
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
 from selfheal.config import Config
 from selfheal.models import State, utcnow
+from selfheal.remediation.native_backend import NativeBackend
+from selfheal.remediation.registry import default_registry
+from selfheal.safety.contracts import DiagnosisContext
+from selfheal.safety.native_inventory import NativeInventory
+from selfheal.safety.policy import Policy
 from selfheal.safety.state import SafetyState
 from selfheal.storage.store import Store
 
@@ -23,10 +29,11 @@ class ApprovalRequest(BaseModel):
     """Payload to approve a pending proposal."""
 
     proposal_id: str = Field(description="Digest/ID of the pending proposal to authorize.")
-    actor: str = Field(default="operator", description="Trusted local human operator identifier.")
 
 
-def create_dashboard_app(config: Config, store: Store | None = None) -> Any:
+def create_dashboard_app(
+    config: Config, store: Store | None = None, approval_token: str | None = None
+) -> Any:
     """Create and configure the localhost-only FastAPI dashboard."""
     if not FASTAPI_AVAILABLE:
         raise ImportError(
@@ -36,6 +43,11 @@ def create_dashboard_app(config: Config, store: Store | None = None) -> Any:
 
     db_store = store or Store(config.database)
     safety_state = SafetyState(db_store)
+    inventory = NativeInventory(config)
+    policy = Policy(
+        default_registry(), inventory, NativeBackend(inventory), safety_state,
+        config.safety, dry_run=config.dry_run, max_auto_targets=config.max_auto_targets,
+    )
 
     app = FastAPI(
         title="Slime SelfHeal Dashboard",
@@ -52,6 +64,9 @@ def create_dashboard_app(config: Config, store: Store | None = None) -> Any:
                 status_code=403,
                 content={"error": "Forbidden: Slime dashboard is strictly localhost-only."},
             )
+        host = request.headers.get("host", "").split(":", 1)[0].lower()
+        if host not in ("127.0.0.1", "localhost", "testserver"):
+            return JSONResponse(status_code=403, content={"error": "Invalid dashboard Host header"})
         return await call_next(request)
 
     @app.get("/", response_class=HTMLResponse)
@@ -145,6 +160,12 @@ def create_dashboard_app(config: Config, store: Store | None = None) -> Any:
   </div>
 
   <script>
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      })[ch]);
+    }
+
     async function loadData() {
       try {
         const [healthRes, tiersRes, incidentsRes, approvalsRes, historyRes, auditRes] = await Promise.all([
@@ -165,7 +186,7 @@ def create_dashboard_app(config: Config, store: Store | None = None) -> Any:
         // Tiers
         let tiersHtml = '<table><tr><th>Tier</th><th>Type</th><th>Status</th></tr>';
         for (const t of tiersRes.tiers) {
-          tiersHtml += `<tr><td><strong>${t.name}</strong></td><td>${t.type}</td><td><span class="badge ${t.status === 'active' ? 'badge-success' : 'badge-info'}">${t.status}</span></td></tr>`;
+          tiersHtml += `<tr><td><strong>${escapeHtml(t.name)}</strong></td><td>${escapeHtml(t.type)}</td><td><span class="badge ${t.status === 'active' ? 'badge-success' : 'badge-info'}">${escapeHtml(t.status)}</span></td></tr>`;
         }
         tiersHtml += '</table>';
         document.getElementById('tiers-content').innerHTML = tiersHtml;
@@ -176,7 +197,7 @@ def create_dashboard_app(config: Config, store: Store | None = None) -> Any:
         } else {
           let appHtml = '<table><tr><th>Proposal ID</th><th>Actor</th><th>Action</th></tr>';
           for (const a of approvalsRes.approvals) {
-            appHtml += `<tr><td><code>${a.proposal_id.substring(0, 12)}...</code></td><td>${a.actor}</td><td><button onclick="approve('${a.proposal_id}')">Approve</button></td></tr>`;
+            appHtml += `<tr><td><code>${escapeHtml(a.proposal_id.substring(0, 12))}...</code></td><td>${escapeHtml(a.action)} on ${escapeHtml(a.target)}</td><td><button onclick="approve('${a.proposal_id}')">Approve</button></td></tr>`;
           }
           appHtml += '</table>';
           document.getElementById('approvals-content').innerHTML = appHtml;
@@ -188,7 +209,7 @@ def create_dashboard_app(config: Config, store: Store | None = None) -> Any:
         } else {
           let incHtml = '<table><tr><th>ID</th><th>State</th><th>Services</th><th>Root Candidates</th><th>Flaps</th></tr>';
           for (const inc of incidentsRes.incidents) {
-            incHtml += `<tr><td><code>${inc.id}</code></td><td><span class="badge badge-info">${inc.state}</span></td><td>${inc.services.join(', ')}</td><td>${inc.root_candidates.join(', ')}</td><td>${inc.flap_count}</td></tr>`;
+            incHtml += `<tr><td><code>${escapeHtml(inc.id)}</code></td><td><span class="badge badge-info">${escapeHtml(inc.state)}</span></td><td>${escapeHtml(inc.services.join(', '))}</td><td>${escapeHtml(inc.root_candidates.join(', '))}</td><td>${escapeHtml(inc.flap_count)}</td></tr>`;
           }
           incHtml += '</table>';
           document.getElementById('incidents-content').innerHTML = incHtml;
@@ -200,7 +221,7 @@ def create_dashboard_app(config: Config, store: Store | None = None) -> Any:
         } else {
           let histHtml = '<table><tr><th>Incident</th><th>Action</th><th>Target</th><th>Stable</th><th>Verified At</th></tr>';
           for (const o of historyRes.outcomes) {
-            histHtml += `<tr><td><code>${o.incident_id}</code></td><td>${o.action_name}</td><td>${o.target}</td><td><span class="badge ${o.stable ? 'badge-success' : 'badge-danger'}">${o.stable ? 'Yes' : 'No'}</span></td><td class="timestamp">${o.verified_at}</td></tr>`;
+            histHtml += `<tr><td><code>${escapeHtml(o.incident_id)}</code></td><td>${escapeHtml(o.action_name)}</td><td>${escapeHtml(o.target)}</td><td><span class="badge ${o.stable ? 'badge-success' : 'badge-danger'}">${o.stable ? 'Yes' : 'No'}</span></td><td class="timestamp">${escapeHtml(o.verified_at)}</td></tr>`;
           }
           histHtml += '</table>';
           document.getElementById('history-content').innerHTML = histHtml;
@@ -209,7 +230,7 @@ def create_dashboard_app(config: Config, store: Store | None = None) -> Any:
         // Audit
         let audHtml = '<table><tr><th>Time</th><th>Subject</th><th>Rule</th><th>Detail</th></tr>';
         for (const row of auditRes.audit) {
-          audHtml += `<tr><td class="timestamp">${row.timestamp}</td><td>${row.subject}</td><td><code>${row.rule}</code></td><td>${row.detail}</td></tr>`;
+          audHtml += `<tr><td class="timestamp">${escapeHtml(row.timestamp)}</td><td>${escapeHtml(row.subject)}</td><td><code>${escapeHtml(row.rule)}</code></td><td>${escapeHtml(row.detail)}</td></tr>`;
         }
         audHtml += '</table>';
         document.getElementById('audit-content').innerHTML = audHtml;
@@ -221,16 +242,23 @@ def create_dashboard_app(config: Config, store: Store | None = None) -> Any:
 
     async function approve(proposalId) {
       if (!confirm('Authorize execution of proposal ' + proposalId + '?')) return;
+      let token = sessionStorage.getItem('slimeApprovalToken');
+      if (!token) {
+        token = prompt('Enter the approval token shown in the dashboard terminal:');
+        if (!token) return;
+        sessionStorage.setItem('slimeApprovalToken', token);
+      }
       try {
         const res = await fetch('/api/approve', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ proposal_id: proposalId, actor: 'dashboard_operator' })
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+          body: JSON.stringify({ proposal_id: proposalId })
         });
         if (res.ok) {
           alert('Proposal approved successfully.');
           loadData();
         } else {
+          if (res.status === 403) sessionStorage.removeItem('slimeApprovalToken');
           const err = await res.json();
           alert('Approval error: ' + (err.detail || err.error));
         }
@@ -285,39 +313,59 @@ def create_dashboard_app(config: Config, store: Store | None = None) -> Any:
 
     @app.get("/api/approvals")
     def get_approvals() -> dict[str, Any]:
-        """List active or pending approvals."""
-        rows = db_store.connection.execute(
-            "SELECT digest, actor, expires_at FROM approvals WHERE consumed=0 ORDER BY rowid DESC"
-        ).fetchall()
+        """List staged requests without exposing a token or inventing approvals."""
         return {
             "approvals": [
                 {
-                    "proposal_id": r[0],
-                    "actor": r[1],
-                    "expires_at": r[2],
+                    "proposal_id": digest,
+                    "action": proposal.name,
+                    "target": str(proposal.params.get("target", "")),
+                    "incident_id": proposal.incident_id,
                 }
-                for r in rows
+                for digest, proposal in safety_state.pending()
+                if not safety_state.approved(proposal)
             ]
         }
 
     @app.post("/api/approve")
-    def post_approve(req: ApprovalRequest) -> dict[str, Any]:
-        """Authorize a pending action proposal with durable audit record."""
-        if not req.proposal_id or not req.proposal_id.strip():
-            raise HTTPException(status_code=400, detail="Invalid proposal_id")
-
-        actor = req.actor.strip() or "operator"
-        expires = (utcnow() + timedelta(seconds=300)).isoformat()
-        with db_store.connection:
+    def post_approve(req: ApprovalRequest, request: Request) -> dict[str, Any]:
+        """Approve only a current staged proposal with a live policy recheck."""
+        if approval_token is None:
+            raise HTTPException(status_code=403, detail="Dashboard approvals disabled")
+        supplied = request.headers.get("authorization", "")
+        if not supplied.startswith("Bearer ") or not secrets.compare_digest(
+            supplied[7:], approval_token
+        ):
+            raise HTTPException(status_code=403, detail="Operator token required")
+        origin = request.headers.get("origin", "")
+        parsed = urlsplit(origin)
+        if (
+            parsed.scheme != "http"
+            or parsed.netloc.lower() != request.headers.get("host", "").lower()
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise HTTPException(status_code=403, detail="Same-origin request required")
+        proposal = safety_state.pending_by_digest(req.proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="No staged proposal")
+        incident = next((i for i in db_store.incidents() if i.id == proposal.incident_id), None)
+        if incident is None or incident.state not in (State.OPEN, State.INVESTIGATING, State.ESCALATED):
+            raise HTTPException(status_code=409, detail="Incident is no longer awaiting review")
+        decision = policy.evaluate(proposal, DiagnosisContext(incident_id=proposal.incident_id))
+        if decision.rule not in ("approval_required", "critical_approval_required"):
+            raise HTTPException(status_code=409, detail=f"Proposal no longer approvable: {decision.rule}")
+        safety_state.approve(proposal, "dashboard_session_operator")
+        with safety_state.transaction():
             db_store.connection.execute(
-                "INSERT OR REPLACE INTO approvals VALUES (?, ?, ?, 0)",
-                (req.proposal_id.strip(), actor, expires),
+                "DELETE FROM pending_approvals WHERE digest=?", (req.proposal_id,)
             )
-            db_store.audit(actor, "dashboard_approval", req.proposal_id.strip())
+            db_store.audit(proposal.incident_id, "dashboard_approval", req.proposal_id)
         return {
             "status": "approved",
             "proposal_id": req.proposal_id,
-            "actor": actor,
+            "actor": "dashboard_session_operator",
             "timestamp": utcnow().isoformat(),
         }
 
@@ -381,5 +429,7 @@ def run_dashboard(config: Config, host: str = "127.0.0.1", port: int = 8080) -> 
             f"Security violation: Dashboard is strictly localhost-only. Host '{host}' is forbidden."
         )
 
-    app = create_dashboard_app(config)
+    token = secrets.token_urlsafe(32)
+    print(f"Dashboard approval token (this session only): {token}")
+    app = create_dashboard_app(config, approval_token=token)
     uvicorn.run(app, host=host, port=port, log_level="info")

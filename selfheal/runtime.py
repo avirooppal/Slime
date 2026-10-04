@@ -378,6 +378,7 @@ class Coordinator:
                     NotificationLevel.CRITICAL,
                 )
             elif "approval" in reason.lower():
+                self.state.stage_pending(top_proposal)
                 self.notifications.notify(
                     "approval_required",
                     f"Approval Required: {incident.id}",

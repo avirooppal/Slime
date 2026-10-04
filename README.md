@@ -1,190 +1,185 @@
 # Slime: Local-First DevOps Incident Agent
 
-Slime is a local-first, safety-first autonomous DevOps incident investigation and remediation agent for Python 3.10+.
-**All Phases 1–9 are fully implemented, verified, and operational**:
-- **Phase 1**: Signal collection (metrics, logs, journald, health checks, change detection), Drain3 log clustering, statistical anomaly alerts, and graph-aware incident correlation.
-- **Phase 2**: Nine registered typed actions, deterministic safety policy, durable human approvals, native inventory, and sampled stability verification.
-- **Phase 3**: D1 BM25 historical memory retriever, D2 declarative runbooks, pure typed action ranking planner, durable postmortems, and core operational CLI (`run`, `status`, `incidents`, `approve`, `dry-run`, `kill-switch`, `reset-circuit`, `reconcile`).
-- **Phase 4**: Non-destructive chaos harness, adversarial injection evaluation, and JSONL ground-truth export.
-- **Phase 5**: D3 local LLM (Ollama) hypothesis loop with bounded read-only tool execution and strict fallback.
-- **Phase 6**: Learning engine with context fingerprints, multi-attribute Jaccard similarity, and verified outcome shortcut evaluation.
-- **Phase 7**: Reproducible incident benchmarking (`selfheal bench`) across public and local dataset adapters with 0.0% unsafe action guarantees.
-- **Phase 8**: Optional D4 Cloud LLM (summary-only redaction, env-only API keys, hourly call & spend caps) and optional D5 Laya classifier (calibrated closed-set neural/linear classifier, latency gates, ablation reporting).
-- **Phase 9**: Localhost-only FastAPI interactive dashboard (`selfheal dashboard`), multi-channel notifications (desktop toasts, application logging, durable audit trail), and complete security boundaries.
+Slime is an autonomous, local-first incident detection, investigation, and remediation agent for Linux and Windows hosts. It correlates multi-signal telemetry (metrics, logs, health checks, change events), diagnoses root causes via a tiered decision engine, and executes deterministic, policy-guarded repairs with automated verification.
 
-Dry-run mode is enabled by default. No cloud API keys or external telemetry are required for complete operation.
+---
+
+## Architecture
+
+```text
+[Telemetry Collectors] ──► [Correlation Engine] ──► [Diagnosis Hierarchy (D1–D5)]
+(Metrics, Logs, Health,     (Incident Graph,          ├─ D1: BM25 Verified Memory
+ Changes, Journald)          Anomaly Scoring)         ├─ D5: Laya Calibrated Classifier
+                                                      ├─ D3: Local LLM (Ollama)
+                                                      ├─ D4: Cloud LLM (Opt-in)
+                                                      └─ D2: Declarative Runbooks
+                                                                     │
+[Postmortem & Audit] ◄── [Stability Verifier] ◄── [Safety Policy & Executor]
+(SQLite, Postmortems,     (Configured Window,      (9 Typed Actions, Approvals,
+ Notifications)           Sampled Probes)          Circuit Breakers, Cooldowns)
+```
 
 ---
 
 ## Quickstart
 
-### 1. Environment Setup
-```powershell
-# Windows PowerShell
+### 1. Installation
+Requires Python 3.10+.
+
+```bash
+# Clone and create virtual environment
+git clone https://github.com/avirooppal/Slime-self-healing-DevOps.git
+cd Slime-self-healing-DevOps
 python -m venv .venv
-.venv/Scripts/python -m pip install --upgrade pip
-.venv/Scripts/python -m pip install -e ".[dev,dashboard]"
-```
-*(On Linux/macOS, use `.venv/bin/` instead of `.venv/Scripts/`)*
 
-### 2. Initialize and Verify Configuration
-```powershell
-# Create baseline dry-run config.yaml
-.venv/Scripts/selfheal init
+# Activate virtual environment
+# Windows:
+.venv\Scripts\activate
+# Linux/macOS:
+source .venv/bin/activate
 
-# Inspect host capabilities and active diagnosis tiers
-.venv/Scripts/selfheal doctor
-
-# Run full test suite (174 passed, 4 expected platform skips)
-.venv/Scripts/python -m pytest -q -ra
+# Install with development and dashboard extras
+pip install -e ".[dev,dashboard]"
 ```
 
-### 3. Run Autonomous Monitoring and Self-Healing
-```powershell
+### 2. Initialize Configuration
+```bash
+# Generate baseline config.yaml (refuses to overwrite existing configs)
+selfheal init
+
+# Check environment capabilities, collectors, and active tiers
+selfheal doctor
+```
+
+### 3. Run Autonomous Monitoring
+```bash
 # Run a single evaluation cycle in default dry-run mode
-.venv/Scripts/selfheal run --once
+selfheal run --once
 
-# Inspect open and investigating incidents
-.venv/Scripts/selfheal incidents
+# Inspect correlated incidents
+selfheal incidents
 
-# Check agent status, circuit breaker, and recent actions
-.venv/Scripts/selfheal status
+# Check agent status, kill switch, and circuit breaker
+selfheal status
 ```
 
 ### 4. Interactive Localhost Dashboard
-```powershell
-# Launch the web dashboard on http://127.0.0.1:8080
-.venv/Scripts/selfheal dashboard --port 8080
+```bash
+# Start the monitoring and approval web UI (bound strictly to 127.0.0.1)
+selfheal dashboard --port 8080
 ```
-The dashboard is strictly localhost-only (`127.0.0.1`) and provides live visibility into:
-- System health, dry-run mode, and circuit breaker state
-- Active diagnosis tiers (D1–D5)
-- Open incidents and root-cause candidate rankings
-- Pending human approvals with single-click authorization
-- Historical verified outcomes and postmortem reports
-- Append-only audit logs
-
-### 5. Reproducible Incident Benchmarking
-```powershell
-# Benchmark local chaos and adversarial scenarios across tiers
-.venv/Scripts/selfheal bench --tiers D2_RUNBOOK,COMBINED
-
-# Export benchmark report as structured JSON
-.venv/Scripts/selfheal bench --json --output benchmark_report.json
-```
+Open `http://127.0.0.1:8080` in your browser.
 
 ---
 
-## Architectural Overview
+## Configuration (`config.yaml`)
 
-### Diagnosis Tier Hierarchy
-Slime evaluates candidate root causes and repair actions using a strict fallback hierarchy:
-```text
-           [Incoming Correlated Incident]
-                         │
-                         ▼
-             [D1 Learning Shortcut]
-       (Fingerprint Match >= 85% & Samples >= 2)
-              ├── Eligible ──► Fast Verified Repair Proposal
-              └── Ineligible / Context Shift
-                         │
-                         ▼
-             [D5 Laya Closed-Set Classifier]
-       (Calibrated Confidence >= 80% & Latency <= 50ms)
-              ├── Valid ──────► Typed Repair Proposal
-              └── Abstain / Disabled / Exceeded Gate
-                         │
-                         ▼
-             [D3 Local LLM (Ollama)]
-       (Bounded 6-step hypothesis loop with read-only tools)
-              ├── Valid ──────► Typed Repair Proposal
-              └── Timeout / Invalid / Unreachable
-                         │
-                         ▼
-             [D4 Opt-In Cloud LLM]
-       (Redacted summary-only prompt, spend caps, env-only key)
-              ├── Valid ──────► Typed Repair Proposal
-              └── Abstain / Disabled / Missing Key / Error
-                         │
-                         ▼
-             [D2 Declarative Runbooks]
-       (Deterministic graph & signature matching)
-              ├── Valid ──────► Typed Repair Proposal
-              └── Abstain
-                         │
-                         ▼
-       [Safe Abstain / Human Review Escalation]
+```yaml
+database: "slime.db"          # SQLite event and outcome repository
+dry_run: true                 # Default: true (set to false for live mutation)
+poll_seconds: 5.0             # Collector polling interval
+correlation_seconds: 300      # Time window for incident correlation
+stability_seconds: 120        # Post-remediation verification window
+max_auto_targets: 1           # Maximum concurrent auto-remediation targets
+ollama_model: "qwen2.5:3b-instruct" # D3 local LLM model
+
+# Service definitions
+services:
+  - name: "api"
+    container_name: "api-service"
+    logs: ["logs/api.log"]
+    http_url: "http://127.0.0.1:8000/health"
+    depends_on: ["database"]
+  - name: "database"
+    container_name: "db-service"
+    logs: ["logs/db.log"]
+    process_pid: 1234
+
+# Safety constraints
+safety:
+  minimum_confidence: 0.90     # Policy threshold for automated repair
+  max_hourly_auto_actions: 5   # Hourly rate limit
+  action_cooldown_seconds: 300 # Per-action/target cooldown
+  consecutive_failure_limit: 3 # Circuit breaker threshold
 ```
-
-### The 9 Typed Remediation Actions
-Every remediation action is strictly typed and validated against live host inventory:
-| Action | Safety Class | Target Required | Rollback Supported |
-|---|---|---|---|
-| `restart_container` | SAFE | Exact container alias | No |
-| `restart_service` | APPROVAL | Exact systemd unit | No |
-| `reload_service` | APPROVAL | Exact systemd unit | No |
-| `kill_runaway_process`| APPROVAL | Pinned PID | No |
-| `quarantine_tmp_files`| SAFE | Dedicated quiescent tmp file | Yes (restore from quarantine) |
-| `rotate_log_file` | SAFE | Dedicated quiescent log file | No |
-| `revert_config_file` | APPROVAL | Explicit versioned config file| Yes |
-| `rollback_container_image`| APPROVAL | Deployment-specific adapter | Refused on generic containers |
-| `remove_dangling_images`| APPROVAL | Exact dangling image ID | No |
-
----
-
-## Safety Controls & Invariants
-
-1. **Untrusted Data Isolation**: All logs, alerts, container names, model texts, and tool outputs are treated as untrusted data. They can never supply execution permissions or bypass the safety policy.
-2. **Deterministic Safety Policy**: Prohibits model-generated shell commands. Remediations must be registered typed actions targeting validated inventory entities.
-3. **Dry-Run by Default**: Actions are logged and audited without host mutation unless explicitly overridden by the operator.
-4. **Rate Limits & Circuit Breaker**:
-   - Maximum 1 target per automated repair cycle.
-   - Maximum 5 automated repairs per hour.
-   - 300-second per-action/per-target cooldown.
-   - Circuit breaker trips after 3 consecutive failures; requires explicit human reset via `.venv/Scripts/selfheal reset-circuit`.
-5. **Stability Verification**: Remediations are only marked successful after passing the full stability window (`stability_seconds: 120`). Flapping incidents are immediately escalated.
-6. **Zero Secrets in Config or DB**: API keys and credentials are never stored in `config.yaml` or SQLite. Cloud LLM keys are read exclusively from `os.environ`.
-7. **Localhost-Only Dashboard**: Binds strictly to `127.0.0.1`. Requests from non-localhost interfaces are rejected with HTTP 403 Forbidden.
 
 ---
 
 ## CLI Reference
 
-| Command | Description |
-|---|---|
-| `selfheal init` | Creates baseline dry-run `config.yaml` without overwriting. |
-| `selfheal doctor` | Audits collector status, Ollama connectivity, and diagnosis tiers. |
-| `selfheal run` | Executes polling, correlation, diagnosis, planning, policy, and repair. |
-| `selfheal status` | Displays live agent health, circuit breaker, and recent actions. |
-| `selfheal incidents` | Lists active, investigating, escalated, and resolved incidents. |
-| `selfheal approve` | Records a single-use human approval for an exact proposal digest. |
-| `selfheal dry-run` | Toggles dry-run mode in `config.yaml`. |
-| `selfheal kill-switch`| Engages or disengages global emergency stop. |
-| `selfheal reset-circuit`| Operator reset of tripped circuit breaker. |
-| `selfheal reconcile` | Operator acknowledgement of interrupted or uncertain attempts. |
-| `selfheal chaos` | Executes non-destructive synthetic failure and injection scenarios. |
-| `selfheal bench` | Runs multi-tier incident benchmarks and reports accuracy and latency. |
-| `selfheal dashboard` | Starts the localhost-only FastAPI web monitoring dashboard. |
+| Command | Usage | Description |
+|---|---|---|
+| `init` | `selfheal init` | Detects host capabilities and writes default `config.yaml`. |
+| `doctor` | `selfheal doctor` | Diagnostic audit of telemetry sources, Ollama, and tiers. |
+| `run` | `selfheal run [--once]` | Executes monitor, correlator, diagnosis, planner, and executor. |
+| `status` | `selfheal status` | Displays circuit breaker state, kill switch, and hourly counters. |
+| `incidents` | `selfheal incidents` | Lists active, investigating, escalated, and resolved incidents. |
+| `approve` | `selfheal approve --action <act> --target <tgt>` | Authorizes an action requiring human approval by digest. |
+| `dry-run` | `selfheal dry-run <true\|false>` | Toggles dry-run execution safety mode in configuration. |
+| `kill-switch` | `selfheal kill-switch <true\|false>` | Engages or disengages global emergency mutation halt. |
+| `reset-circuit` | `selfheal reset-circuit` | Operator reset of a tripped circuit breaker after human inspection. |
+| `reconcile` | `selfheal reconcile <action-id>` | Operator resolution of interrupted or pending attempts. |
+| `chaos` | `selfheal chaos --scenario <name>` | Runs non-destructive local chaos and adversarial tests. |
+| `bench` | `selfheal bench [--tiers T1,T2] [--json]` | Evaluates detection, diagnosis accuracy, and latency across tiers. |
+| `dashboard` | `selfheal dashboard [--port 8080]` | Serves the localhost-only FastAPI dashboard UI. |
 
 ---
 
-## Validation & Test Suite
+## Remediation Actions & Safety Model
 
-The system maintains a 100% passing test baseline across all phases:
-```powershell
-.venv/Scripts/python -m pytest -q -ra
-.venv/Scripts/python -m ruff check selfheal tests
-.venv/Scripts/python -m mypy selfheal --ignore-missing-imports
-.venv/Scripts/python -m pip check
-.venv/Scripts/selfheal doctor
+All remediation actions are registered, strictly typed, and validated against host inventory:
+
+| Action | Safety Tier | Target Required | Rollback Support |
+|---|---|---|---|
+| `restart_container` | **SAFE** | Container alias | None |
+| `restart_service` | **APPROVAL** | Systemd unit | None |
+| `reload_service` | **APPROVAL** | Systemd unit | None |
+| `kill_runaway_process` | **APPROVAL** | Pinned PID | None |
+| `quarantine_tmp_files` | **SAFE** | Quiescent private file | Supported (restore from quarantine) |
+| `rotate_log_file` | **SAFE** | Quiescent log file | None |
+| `revert_config_file` | **APPROVAL** | Versioned config file | Supported (revert to baseline) |
+| `rollback_container_image` | **APPROVAL** | Deployment adapter | Refused on generic containers |
+| `remove_dangling_images` | **APPROVAL** | Dangling image ID | None |
+
+### Safety Invariants
+1. **Zero Shell Execution**: No arbitrary shell commands can be generated or executed by models.
+2. **Untrusted Data Boundary**: Logs, alerts, container names, and model text are untrusted data. They cannot alter diagnosis context or grant authorization.
+3. **Circuit Breaker**: Trips automatically after 3 consecutive failures. Requires explicit human reset (`selfheal reset-circuit`).
+4. **Zero Credentials in Code/DB**: API keys are forbidden in `config.yaml` and SQLite. Cloud keys must reside exclusively in environment variables (`SLIME_CLOUD_API_KEY`).
+5. **Localhost-Only Dashboard**: The dashboard server strictly binds to `127.0.0.1`. Non-localhost client connections are blocked with HTTP 403 Forbidden.
+
+---
+
+## Diagnosis Hierarchy (D1–D5)
+
+Slime evaluates candidate causes through a tiered fallback chain:
+
+1. **D1 Memory Shortcut**: Matches verified historical outcomes via context fingerprints and weighted Jaccard similarity ($\ge 85\%$). Bypasses LLM latency on recurring incidents.
+2. **D5 Laya Classifier**: Fast closed-set linear/neural classifier with temperature-calibrated probabilities. Gated by latency ($\le 50\text{ ms}$) and confidence ($\ge 80\%$).
+3. **D3 Local LLM (Ollama)**: Bounded 6-step hypothesis loop querying read-only diagnostic tools. Validates outputs via strict Pydantic schemas.
+4. **D4 Cloud LLM (Opt-in)**: Sends redacted, summary-only context to external providers. Gated by hourly call and spend caps.
+5. **D2 Declarative Runbooks**: Deterministic graph and signature matching (e.g. OOM kills, hang conditions, configuration regressions).
+6. **Escalation**: Safe abstention requiring human review if no viable automated path meets the confidence threshold.
+
+---
+
+## Testing & Quality Gate
+
+Run the complete 5-part verification gate:
+
+```bash
+# 1. Pytest suite (174 passed, 4 expected platform skips)
+pytest -q -ra
+
+# 2. Ruff linter
+ruff check selfheal tests
+
+# 3. Mypy static type checker
+mypy selfheal --ignore-missing-imports
+
+# 4. Pip dependency consistency
+pip check
+
+# 5. Runtime doctor
+selfheal doctor
 ```
-See detailed validation reports in `docs/`:
-- [Phase 1 Validation](docs/phase1-validation.md)
-- [Phase 2 Validation](phase2-validation.md)
-- [Phase 3 Validation](docs/phase3-validation.md)
-- [Phase 4 Validation](docs/phase4-validation.md)
-- [Phase 5 Validation](docs/phase5-validation.md)
-- [Phase 6 Validation](docs/phase6-validation.md)
-- [Phase 7 Validation](docs/phase7-validation.md)
-- [Phase 8 Validation](docs/phase8-validation.md)
-- [Phase 9 Validation](docs/phase9-validation.md)
