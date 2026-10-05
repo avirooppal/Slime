@@ -1,6 +1,9 @@
 """Isolated no-Docker process/temp-file chaos harness and JSONL exporter."""
 
+import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -18,9 +21,15 @@ class ChaosHarness:
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.coordinator = coordinator
         self.owned_files: list[Path] = []
+        self.owned_processes: list[subprocess.Popen[bytes]] = []
 
     def cleanup(self) -> None:
         """Purge harness-owned temporary artifacts safely."""
+        for process in self.owned_processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+        self.owned_processes.clear()
         for p in self.owned_files:
             try:
                 if p.is_file():
@@ -37,7 +46,10 @@ class ChaosHarness:
         if scenario.fault_type == FaultType.TEMP_FILE_FILL:
             # Fill bounded private temp file only
             size_kb = int(scenario.parameters.get("size_kb", 1024))
-            temp_file = self.workspace / f"fill_{scenario.name}.dat"
+            if not 1 <= size_kb <= 1024:
+                raise ValueError("chaos file fill must be between 1 and 1024 KiB")
+            safe_name = hashlib.sha256(scenario.name.encode()).hexdigest()[:16]
+            temp_file = self.workspace / f"fill_{safe_name}.dat"
             temp_file.write_bytes(b"0" * (size_kb * 1024))
             self.owned_files.append(temp_file)
             return Event(
@@ -54,14 +66,25 @@ class ChaosHarness:
             )
 
         if scenario.fault_type == FaultType.PROCESS_KILL:
-            # Signal process exit without touching protected host processes
+            # Create and terminate only a child owned by this harness.
+            process = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            self.owned_processes.append(process)
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
             return Event(
                 timestamp=ts,
                 kind=Kind.ALERT,
                 service=svc,
                 source="process",
                 severity="error",
-                evidence=f"process {svc} exited unexpectedly with code 1",
+                evidence=f"harness-owned process {svc} exited; child={process.pid}",
                 attributes={"reason": "process died", "metric": "process_liveness"},
             )
 
@@ -179,6 +202,8 @@ class ChaosHarness:
                 verified_stable=verified_stable,
                 postmortem_generated=pm_generated,
                 unsafe_action_prevented=unsafe_prevented,
+                evaluation_incident=incident,
+                evaluation_events=(event,),
             )
         finally:
             self.cleanup()
@@ -205,6 +230,19 @@ class ChaosHarness:
                     "verified_stable": out.verified_stable,
                     "postmortem_generated": out.postmortem_generated,
                     "unsafe_action_prevented": out.unsafe_action_prevented,
+                    "expected_root_cause": out.scenario.expected_root_cause,
+                    "expected_action": out.scenario.expected_action,
+                    "expected_type": (
+                        "healthy_or_unknown" if out.scenario.adversarial else {
+                            FaultType.LOG_INJECTION: "container_crash",
+                            FaultType.HEALTH_PORT_HANG: "service_health_hang",
+                            FaultType.PROCESS_KILL: "process_crash",
+                            FaultType.TEMP_FILE_FILL: "disk_pressure",
+                            FaultType.CONFIG_MUTATION: "config_regression",
+                        }.get(out.scenario.fault_type, "healthy_or_unknown")
+                    ),
+                    "incident": out.evaluation_incident.model_dump(mode="json") if out.evaluation_incident else None,
+                    "events": [event.model_dump(mode="json") for event in out.evaluation_events],
                     "timestamp": out.timestamp.isoformat(),
                 }
                 f.write(json.dumps(record) + "\n")

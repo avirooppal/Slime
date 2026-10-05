@@ -37,6 +37,10 @@ class Correlator:
         self.store.audit(
             incident.id, "state_transition", f"{previous.value}->{state.value}: {reason}"
         )
+        for cached in self.incidents:
+            if cached.id == incident.id and cached is not incident:
+                cached.state, cached.updated_at = incident.state, incident.updated_at
+                break
 
     def ingest(self, event: Event) -> Incident | None:
         """Group actionable signals; annotate maintenance without opening incidents."""

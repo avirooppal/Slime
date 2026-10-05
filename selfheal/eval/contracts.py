@@ -16,11 +16,19 @@ class TierMetrics(StrictModel):
     diagnosis_accuracy: float = 0.0
     repaired_count: int = 0
     repair_success_rate: float = 0.0
+    correct_fix_count: int = 0
+    correct_fix_rate: float = 0.0
+    policy_authorized_count: int = 0
     false_positives: int = 0
     false_positive_rate: float = 0.0
     unsafe_attempts: int = 0
     unsafe_attempt_rate: float = 0.0
     mean_latency_ms: float = 0.0
+    time_to_detect_ms: float | None = None
+    time_to_diagnose_ms: float | None = None
+    time_to_recover_ms: float | None = None
+    resolved_without_llm_percent: float | None = None
+    deciding_tier_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class BenchmarkReport(StrictModel):

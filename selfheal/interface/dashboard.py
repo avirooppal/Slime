@@ -1,5 +1,7 @@
 """Optional one-page localhost-only FastAPI dashboard for Slime Phase 9."""
 
+import importlib.util
+import os
 import secrets
 from typing import Any
 from urllib.parse import urlsplit
@@ -7,6 +9,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, Field
 
 from selfheal.config import Config
+from selfheal.diagnosis.laya_classifier import LayaClassifier
 from selfheal.models import State, utcnow
 from selfheal.remediation.native_backend import NativeBackend
 from selfheal.remediation.registry import default_registry
@@ -43,7 +46,7 @@ def create_dashboard_app(
 
     db_store = store or Store(config.database)
     safety_state = SafetyState(db_store)
-    inventory = NativeInventory(config)
+    inventory = NativeInventory(config, store=db_store)
     policy = Policy(
         default_registry(), inventory, NativeBackend(inventory), safety_state,
         config.safety, dry_run=config.dry_run, max_auto_targets=config.max_auto_targets,
@@ -378,6 +381,16 @@ def create_dashboard_app(
     @app.get("/api/tiers")
     def get_tiers() -> dict[str, Any]:
         """Return operational status of diagnosis tiers D1-D5."""
+        cloud_ready = bool(
+            config.cloud_enabled and config.cloud_base_url and config.cloud_model
+            and config.cloud_max_calls_per_month and config.cloud_max_spend_usd
+            and config.cloud_estimated_max_cost_per_call_usd
+            and os.environ.get("SLIME_CLOUD_API_KEY")
+        )
+        laya_ready = bool(
+            config.laya_enabled and importlib.util.find_spec("laya")
+            and LayaClassifier(config, db_store).evaluation() is not None
+        )
         return {
             "tiers": [
                 {"name": "D1 Memory", "type": "BM25 Verified Outcomes", "status": "active"},
@@ -390,12 +403,12 @@ def create_dashboard_app(
                 {
                     "name": "D4 Cloud LLM",
                     "type": "Opt-in Cloud LLM",
-                    "status": "active" if config.cloud_enabled else "disabled",
+                    "status": "configured" if cloud_ready else "inactive",
                 },
                 {
                     "name": "D5 Laya",
                     "type": "Opt-in Neural/Linear Classifier",
-                    "status": "active" if config.laya_enabled else "disabled",
+                    "status": "eligible" if laya_ready else "inactive",
                 },
             ]
         }

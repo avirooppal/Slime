@@ -1,4 +1,4 @@
-# Slime Phases 1–2: explicit inventory, dry-run by default.
+# Slime: explicit inventory, dry-run by default.
 database: slime.db
 dry_run: true
 metrics_enabled: true
@@ -8,6 +8,17 @@ correlation_seconds: 300
 stability_seconds: 120
 max_auto_targets: 1
 ollama_model: qwen2.5:3b-instruct
+cloud_enabled: false
+cloud_base_url: null # opt-in HTTPS OpenAI-compatible base URL
+cloud_model: ''
+cloud_max_calls_per_hour: 10
+cloud_max_calls_per_month: 0 # must set an explicit cap to enable D4
+cloud_max_spend_usd: 0.0 # estimated monthly USD cap; provider billing may differ
+cloud_estimated_max_cost_per_call_usd: 0.0
+cloud_max_output_tokens: 256
+laya_enabled: false
+laya_eval_report: null # path to held-out selfheal eval report
+laya_required_accuracy_margin: null # operator-set improvement over local baseline
 maintenance: []
 safety:
   minimum_confidence: 0.90
@@ -30,4 +41,11 @@ services: []
 #   journal_unit: example-worker.service
 #   process_pid: 1234
 #   configs: [/var/lib/dpkg/status] # explicit package database fingerprint
+# - name: owned_worker
+#   managed_process:
+#     executable: /usr/bin/python3 # absolute executable, not a shell command
+#     args: [-m, my_worker]
+#     cwd: /opt/my_worker # absolute directory
+#     startup_grace_seconds: 5 # bounded readiness wait before stability checks
+#   http_url: http://127.0.0.1:9000/health # strongly recommended; otherwise only liveness is verified
 

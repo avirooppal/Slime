@@ -50,6 +50,8 @@ class NativeBackend:
                 or service.journal_unit
                 or service.process_pid
             )
+        if name == "restart_managed_process":
+            return self.inventory.supervisor is not None and snapshot.state == "crashed"
         return name in {
             "restart_container",
             "kill_runaway_process",
@@ -71,6 +73,8 @@ class NativeBackend:
             raise RuntimeError("native preconditions no longer hold")
         if name == "restart_container" and snapshot.state != "crashed":
             raise RuntimeError("only a crashed container can be restarted automatically")
+        if name == "restart_managed_process" and snapshot.state != "crashed":
+            raise RuntimeError("only a stopped owned process can be restarted automatically")
         if name in {"clear_tmp_files", "rotate_logs"}:
             return self.inventory.files.execute(name, snapshot, stopped)
         if name == "restart_container":
@@ -83,6 +87,14 @@ class NativeBackend:
                 raise RuntimeError("container identity changed")
             self.guard(stopped)
             container.restart(timeout=2)
+        elif name == "restart_managed_process":
+            service = self.inventory.services[params.target]
+            supervisor = self.inventory.supervisor
+            if supervisor is None:
+                raise RuntimeError("managed process store unavailable")
+            observation = supervisor.inspect(service)
+            self.guard(stopped)
+            supervisor.start(service, observation, stopped or (lambda: False))
         elif name in {"restart_service", "reload_nginx"}:
             service = self.inventory.services[params.target]
             assert service.journal_unit is not None
@@ -144,6 +156,13 @@ class NativeBackend:
                     return True
                 raise
             return False
+        if name == "restart_managed_process":
+            supervisor = self.inventory.supervisor
+            if supervisor is None:
+                return False
+            service = self.inventory.services[params.target]
+            observation = supervisor.inspect(service)
+            return observation.identity != snapshot.identity and supervisor.healthy(service)
         live = self.inventory.snapshot(params.target)
         return live.identity == snapshot.identity and live.healthy
 

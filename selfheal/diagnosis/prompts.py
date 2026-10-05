@@ -22,6 +22,7 @@ AVAILABLE READ-ONLY TOOLS:
 
 REGISTERED ACTIONS:
 - restart_container (target: str)
+- restart_managed_process (target: str)
 - restart_service (target: str)
 - clear_tmp_files (target: str)
 - rotate_logs (target: str)

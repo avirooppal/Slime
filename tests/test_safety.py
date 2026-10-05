@@ -17,7 +17,8 @@ from selfheal.storage.store import Store
 def test_registry_is_closed_and_typed() -> None:
     """All requested actions exist with immutable conservative metadata."""
     registry = default_registry()
-    assert len(registry.actions) == 9
+    assert len(registry.actions) == 10
+    assert registry.get("restart_managed_process").risk == Risk.SAFE
     assert registry.get("restart_service").risk == Risk.APPROVAL
     assert registry.get("free_docker_space").risk == Risk.APPROVAL
     assert registry.get("rotate_logs").risk == Risk.SAFE

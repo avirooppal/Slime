@@ -1,7 +1,7 @@
 # Phase 8 Validation: Optional Tiers (D4 Cloud LLM & D5 Laya Classifier)
 
 ## Overview
-Phase 8 implements optional, opt-in advanced diagnosis tiers as specified in `docs/HANDOFF.md`:
+Phase 8 implements optional, opt-in advanced diagnosis tiers from the original phase plan:
 1. **D4 Cloud LLM**: Opt-in external diagnosis via environment-only API keys, summary-only redaction (via `sanitize()`), strict hourly call/spend caps, and graceful 1-step degradation to local baselines.
 2. **D5 Laya Classifier**: Opt-in fast closed-set neural/linear classifier with temperature-calibrated confidence, latency/confidence gating, feature ablation analysis, and graceful fallback.
 3. **Strict Secrets Policy**: Invariant enforced across `Config` and `Store` ensuring API keys, secrets, tokens, or credentials never enter configuration files or database storage.

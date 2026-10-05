@@ -1,7 +1,7 @@
 # Phase 9 Validation: Polish, Localhost Dashboard, Notifications, and End-to-End Hardening
 
 ## Overview
-Phase 9 delivers the final polish and operational interfaces for Slime as specified in `docs/HANDOFF.md`:
+Phase 9 delivers the polish and operational interfaces from the original phase plan:
 1. **Interactive Localhost-Only FastAPI Dashboard (`selfheal/interface/dashboard.py`)**:
    - Single-page embedded responsive UI showing system health, live incidents, active diagnosis tiers (D1–D5), pending human approvals, verified outcome learning history, and append-only audit trail.
    - Strict security invariants: bound exclusively to `127.0.0.1` (`localhost`), middleware rejecting non-localhost clients with HTTP 403 Forbidden.

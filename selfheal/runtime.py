@@ -9,6 +9,7 @@ from selfheal.collectors.common import Warnings
 from selfheal.collectors.health_checks import Health
 from selfheal.collectors.journald import Journal
 from selfheal.collectors.log_tailer import LogTailer
+from selfheal.collectors.managed_process import ManagedProcessHealth
 from selfheal.collectors.metrics import Metrics
 from selfheal.config import Config, Service
 from selfheal.correlator.engine import Correlator
@@ -21,6 +22,7 @@ from selfheal.planner.ranking import Planner, RankedProposal
 from selfheal.postmortem.generator import PostmortemGenerator
 from selfheal.remediation.contracts import ActionBackend
 from selfheal.remediation.executor import ExecutionResult, Executor
+from selfheal.remediation.managed_process import ManagedProcessSupervisor
 from selfheal.remediation.native_backend import NativeBackend
 from selfheal.remediation.registry import ActionRegistry, default_registry
 from selfheal.safety.contracts import DiagnosisContext
@@ -52,6 +54,7 @@ class Monitor:
         self.templates = Templates(self.store)
         self.anomalies = Anomalies()
         self.correlator = Correlator(config, self.store)
+        self.managed_processes = ManagedProcessSupervisor(self.store)
         self.warnings = Warnings()
         self.collectors: list[tuple[str, Collector]] = []
         if config.metrics_enabled:
@@ -64,6 +67,11 @@ class Monitor:
                 (f"health:{service.name}", Health(service)),
                 (f"changes:{service.name}", Changes(service, self.store)),
             ]
+            if service.managed_process is not None:
+                self.collectors.append((
+                    f"managed:{service.name}",
+                    ManagedProcessHealth(service, self.managed_processes),
+                ))
             for path in service.logs:
                 self.collectors.append(
                     (f"file:{service.name}:{path}", LogTailer(path, service.name, self.store))
@@ -151,7 +159,7 @@ class Coordinator:
         self.monitor = Monitor(config, self.store)
         self.state = state or SafetyState(self.store)
         self.registry = registry or default_registry()
-        self.inventory = inventory or NativeInventory(config)
+        self.inventory = inventory or NativeInventory(config, store=self.store)
         self.backend = backend or NativeBackend(self.inventory)  # type: ignore[arg-type]
         self.policy = Policy(
             self.registry,
@@ -209,7 +217,7 @@ class Coordinator:
         self.notifications = NotificationEngine(self.store)
 
     def diagnose_incident(self, incident: Incident) -> DiagnosisResult:
-        """Evaluate learning shortcut or force full diagnosis (D5 Laya -> D3 local LLM -> D4 Cloud -> D2 runbooks)."""
+        """Use proven memory and runbooks before optional model tiers."""
         events = self.store.incident_events(incident.id)
 
         # 1. Check if past verified fixes can safely shorten diagnosis
@@ -223,42 +231,25 @@ class Coordinator:
                 notes=shortcut.reasons,
             )
         else:
-            # 2. Shortening not allowed -> forces full diagnosis
-            # Try D5 Laya classifier (if enabled, fast closed-set)
-            laya_result = self.laya.diagnose(incident, events)
-            if laya_result.status == "valid" and laya_result.candidates:
-                result = laya_result
-            else:
-                # Try D3 local LLM (Ollama)
-                d3_result = self.investigator.diagnose(incident, events)
-                if d3_result.status == "valid" and d3_result.candidates:
-                    result = d3_result
-                else:
-                    # Try D4 Cloud LLM (if enabled, summary-only redacted)
-                    cloud_result = self.cloud_investigator.diagnose(incident, events)
-                    if cloud_result.status == "valid" and cloud_result.candidates:
-                        result = cloud_result
-                    else:
-                        # Try D2 runbooks (deterministic local fallback)
-                        d2_result = self.runbooks.diagnose(incident, events)
-                        if d2_result.status == "valid" and d2_result.candidates:
-                            result = d2_result
-                        else:
-                            # Clean fallback to raw retriever or abstain
-                            d1_fallback = self.retriever.diagnose(incident, events)
-                            if d1_fallback.status == "valid" and d1_fallback.candidates:
-                                result = d1_fallback
-                            else:
-                                result = DiagnosisResult(
-                                    incident_id=incident.id,
-                                    status="abstain",
-                                    deciding_tier=DiagnosisTier.D2_RUNBOOK,
-                                    candidates=[],
-                                    notes=[
-                                        "Full diagnosis completed: no matching runbook or model hypothesis; learning shortcut denied: "
-                                        + "; ".join(shortcut.reasons)
-                                    ],
-                                )
+            result = DiagnosisResult(
+                incident_id=incident.id, status="abstain", deciding_tier=DiagnosisTier.NONE,
+                notes=["No diagnosis met the confidence threshold"],
+            )
+            for diagnose in (
+                self.retriever.diagnose,
+                self.runbooks.diagnose,
+                self.laya.diagnose,
+                self.investigator.diagnose,
+                self.cloud_investigator.diagnose,
+            ):
+                attempt = diagnose(incident, events)
+                if attempt.selected is None:
+                    continue
+                if result.selected is None or attempt.selected.confidence > result.selected.confidence:
+                    result = attempt
+                if attempt.selected.confidence >= self.config.safety.minimum_confidence:
+                    result = attempt
+                    break
 
         # Store hypotheses in DB
         for c in result.candidates:
@@ -396,7 +387,7 @@ class Coordinator:
         """Run one read-only poll cycle and process any open incidents."""
         self.monitor.poll()
         results = []
-        for inc in self.store.incidents():
+        for inc in list(self.monitor.correlator.incidents):
             if inc.state in {State.OPEN, State.INVESTIGATING}:
                 diag, proposals, exec_res = self.handle_incident(inc)
                 results.append((inc, diag, proposals, exec_res))

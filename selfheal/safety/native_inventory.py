@@ -2,6 +2,7 @@
 
 import os
 import shutil
+from dataclasses import asdict
 
 import psutil
 
@@ -10,9 +11,11 @@ from selfheal.collectors.health_checks import Health
 from selfheal.config import Config, Service
 from selfheal.remediation.docker_adapter import DockerAdapter
 from selfheal.remediation.files import FileOperations, ManagedFile
+from selfheal.remediation.managed_process import ManagedProcessSupervisor
 from selfheal.safety.contracts import Snapshot
 from selfheal.safety.inventory import revision
 from selfheal.safety.paths import PathAccess
+from selfheal.storage.store import Store
 
 
 class NativeInventory:
@@ -24,6 +27,7 @@ class NativeInventory:
         files: list[ManagedFile] | None = None,
         docker_images: dict[str, str] | None = None,
         docker: DockerAdapter | None = None,
+        store: Store | None = None,
     ) -> None:
         """Pin managed files and symbolic service/container/process aliases."""
         self.config = config
@@ -37,14 +41,17 @@ class NativeInventory:
             docker_images if docker_images is not None else config.docker_images
         )
         self.docker = docker or DockerAdapter()
+        self.supervisor = ManagedProcessSupervisor(store) if store is not None else None
         for service in config.services:
-            if service.name.startswith(("container.", "process.")):
+            if service.name.startswith(("container.", "process.", "managed.")):
                 raise ValueError("service names cannot use reserved action alias prefixes")
             self.services[service.name] = service
             if service.container_name:
                 self.services["container." + service.name] = service
             if service.process_pid:
                 self.services["process." + service.name] = service
+            if service.managed_process:
+                self.services["managed." + service.name] = service
         all_names = list(self.services) + list(self.files.files) + list(self.docker_images)
         if len(set(all_names)) != len(all_names):
             raise ValueError("inventory aliases must be globally unique")
@@ -69,6 +76,23 @@ class NativeInventory:
         if target not in self.services:
             raise LookupError("unknown inventory target")
         service = self.services[target]
+        if target.startswith("managed."):
+            if self.supervisor is None:
+                raise RuntimeError("managed process store unavailable")
+            observation = self.supervisor.inspect(service)
+            external_probe_healthy = (
+                self.supervisor.external_probe_healthy(service)
+                if not observation.alive else False
+            )
+            return Snapshot(
+                target, "managed_process", observation.identity,
+                revision(asdict(observation)),
+                "running" if observation.alive else (
+                    "occupied" if external_probe_healthy else "crashed"
+                ),
+                self.supervisor.healthy(service) if observation.alive else False,
+                service.critical,
+            )
         if target.startswith("container."):
             assert service.container_name is not None
             container = self.docker.container(service.container_name)

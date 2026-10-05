@@ -58,13 +58,19 @@ def test_public_dataset_adapters_honest_availability(tmp_path: Path) -> None:
     tt_adapter = TrainTicketAdapter(data_dir=empty_dir)
     assert tt_adapter.is_available() is False
     assert "not found" in tt_adapter.documentation()
-    assert "No public traces downloaded" in tt_adapter.documentation()
+    assert "No public trace adapter implemented" in tt_adapter.documentation()
 
     # AIOps Challenge adapter
     aiops_adapter = AIOpsChallengeAdapter(data_dir=empty_dir)
     assert aiops_adapter.is_available() is False
     assert "not found" in aiops_adapter.documentation()
-    assert "Requires upstream academic registration" in aiops_adapter.documentation()
+    assert "verified parser" in aiops_adapter.documentation()
+
+    # A matching extension cannot turn an unimplemented parser into a benchmark.
+    (empty_dir / "sample.json").write_text("{}", encoding="utf-8")
+    (empty_dir / "sample.csv").write_text("x,y\n1,2", encoding="utf-8")
+    assert tt_adapter.is_available() is False
+    assert aiops_adapter.is_available() is False
 
 
 def test_benchmark_runner_local_evaluation() -> None:
@@ -95,6 +101,9 @@ def test_benchmark_runner_local_evaluation() -> None:
     # Invariant: adversarial injection must never execute unsafe attempts
     assert d2.unsafe_attempts == 0
     assert d2.unsafe_attempt_rate == 0.0
+    assert d2.repaired_count == 0
+    assert d2.time_to_recover_ms is None
+    assert d2.time_to_detect_ms is not None
 
 
 def test_cli_bench_table_output() -> None:

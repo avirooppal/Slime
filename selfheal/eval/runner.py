@@ -102,9 +102,14 @@ class BenchmarkRunner:
         detected_count = 0
         diagnosed_correct = 0
         repaired_count = 0
+        correct_fixes = 0
+        authorized_count = 0
         false_positives = 0
         unsafe_attempts = 0
         latencies_ms: list[float] = []
+        detection_ms: list[float] = []
+        diagnosis_ms: list[float] = []
+        tier_counts: dict[str, int] = {}
 
         registry = default_registry()
         inventory = BenchmarkFakeInventory()
@@ -163,8 +168,10 @@ class BenchmarkRunner:
                 continue
 
             detected_count += 1
+            detection_ms.append((time.perf_counter() - t0) * 1000.0)
 
             # Diagnosis evaluation
+            diagnosis_started = time.perf_counter()
             diagnosis_result = None
             if tier_name == "D2_RUNBOOK":
                 from selfheal.diagnosis.runbooks import RunbookEngine
@@ -190,18 +197,21 @@ class BenchmarkRunner:
                 diagnosis_result = engine.diagnose(created_incident, events)
 
             latencies_ms.append((time.perf_counter() - t0) * 1000.0)
+            diagnosis_ms.append((time.perf_counter() - diagnosis_started) * 1000.0)
 
             if diagnosis_result and diagnosis_result.status == "valid" and diagnosis_result.candidates:
+                tier_counts[diagnosis_result.deciding_tier] = (
+                    tier_counts.get(diagnosis_result.deciding_tier, 0) + 1
+                )
                 top = diagnosis_result.candidates[0]
                 # Check root cause identification
-                if top.service == scenario.target_service or (
-                    hasattr(scenario, "expected_root_cause")
-                    and top.proposed_action == scenario.expected_root_cause
-                ):
+                if top.service == scenario.expected_root_cause:
                     diagnosed_correct += 1
 
                 # Safety & planning check: ensure no adversarial command was accepted
                 ranked = planner.plan(diagnosis_result)
+                if scenario.expected_action and top.proposed_action == scenario.expected_action:
+                    correct_fixes += 1
                 for r in ranked:
                     decision = policy.authorize(r.proposal, DiagnosisContext(status="valid", incident_id=created_incident.id))
                     # Check invariant: unsafe attempts
@@ -209,7 +219,9 @@ class BenchmarkRunner:
                         if decision.allowed:
                             unsafe_attempts += 1
                     elif decision.allowed:
-                        repaired_count += 1
+                        # Authorization alone cannot prove recovery. No action runs in
+                        # this offline diagnosis benchmark, so recovery stays unmeasured.
+                        authorized_count += 1
                         break
 
             store.close()
@@ -230,18 +242,30 @@ class BenchmarkRunner:
             diagnosis_accuracy=round(diag_acc, 4),
             repaired_count=repaired_count,
             repair_success_rate=round(rep_rate, 4),
+            correct_fix_count=correct_fixes,
+            correct_fix_rate=round(correct_fixes / fault_scenarios, 4) if fault_scenarios else 0.0,
+            policy_authorized_count=authorized_count,
             false_positives=false_positives,
             false_positive_rate=round(fp_rate, 4),
             unsafe_attempts=unsafe_attempts,
             unsafe_attempt_rate=round(unsafe_rate, 4),
             mean_latency_ms=round(mean_lat, 2),
+            time_to_detect_ms=round(sum(detection_ms) / len(detection_ms), 2) if detection_ms else None,
+            time_to_diagnose_ms=round(sum(diagnosis_ms) / len(diagnosis_ms), 2) if diagnosis_ms else None,
+            time_to_recover_ms=None,
+            resolved_without_llm_percent=None,
+            deciding_tier_counts=tier_counts,
         )
 
     def run(self) -> BenchmarkReport:
         """Run benchmark suite across configured dataset adapter and tiers."""
         is_avail = self.adapter.is_available()
         scenarios: list[Scenario] = []
-        notes = [self.adapter.documentation()]
+        notes = [
+            self.adapter.documentation(),
+            ("Offline catalog scores detection, diagnosis, proposals and policy only; "
+             "no repair is executed, so recovery and LLM-free resolution are unmeasured."),
+        ]
 
         if is_avail:
             scenarios = self.adapter.load_scenarios()

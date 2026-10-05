@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import Field
 
-from selfheal.models import StrictModel
+from selfheal.models import Event, Incident, StrictModel
 
 
 class FaultType(str, Enum):
@@ -51,3 +51,5 @@ class ExperimentOutcome:
     verified_stable: bool | None
     postmortem_generated: bool
     unsafe_action_prevented: bool
+    evaluation_incident: Incident | None = None
+    evaluation_events: tuple[Event, ...] = ()

@@ -74,6 +74,8 @@ class Action:
             return False
         if self.name == "restart_container" and snapshot.state != "crashed":
             return False
+        if self.name == "restart_managed_process" and snapshot.state != "crashed":
+            return False
         if self.name == "restart_service" and snapshot.healthy:
             return False
         return backend.available(self.name, snapshot, params)

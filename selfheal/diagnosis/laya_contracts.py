@@ -14,6 +14,7 @@ class LayaPrediction(StrictModel):
     calibrated_confidence: float = Field(ge=0.0, le=1.0)
     latency_ms: float = Field(ge=0.0)
     brier_score: float = 0.0
+    proposed_action: str | None = None
 
 
 class LayaAblationReport(StrictModel):
@@ -24,3 +25,17 @@ class LayaAblationReport(StrictModel):
     ablated_accuracy: float = Field(ge=0.0, le=1.0)
     accuracy_delta: float
     importance_rank: int = 1
+
+
+class LayaEvaluationReport(StrictModel):
+    """Held-out comparison required before Laya may shorten diagnosis."""
+
+    model: str
+    dataset_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    held_out_count: int = Field(ge=20)
+    accuracy: float = Field(ge=0.0, le=1.0)
+    baseline_accuracy: float = Field(ge=0.0, le=1.0)
+    ece: float = Field(ge=0.0, le=1.0)
+    baseline_ece: float = Field(ge=0.0, le=1.0)
+    median_latency_ms: float = Field(ge=0.0)
+    baseline_median_latency_ms: float = Field(ge=0.0)

@@ -1,7 +1,7 @@
 # Phase 7 Validation: Reproducible Benchmarking & Dataset Adapters
 
 ## Overview
-Phase 7 implements reproducible incident benchmarking, standard tier metrics reporting (detection, diagnosis, repair, false-positive, unsafe-attempt rates, and latency), public dataset adapters with honest documentation, and the `selfheal bench` CLI command as specified in `docs/HANDOFF.md`.
+Phase 7 implements reproducible incident benchmarking, standard tier metrics reporting (detection, diagnosis, repair, false-positive, unsafe-attempt rates, and latency), public dataset adapters with honest documentation, and the `selfheal bench` CLI command from the original phase plan.
 
 ## Implemented Components
 1. **Benchmark Contracts (`selfheal/eval/contracts.py`)**:

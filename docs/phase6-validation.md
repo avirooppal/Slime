@@ -1,7 +1,7 @@
 # Phase 6 Validation: Learning from Verified Repair Outcomes
 
 ## Overview
-Phase 6 implements historical repair learning with canonical context fingerprinting, sample thresholding, drift detection, and strict safety gates as defined in `docs/HANDOFF.md`.
+Phase 6 implements historical repair learning with canonical context fingerprinting, sample thresholding, drift detection, and strict safety gates from the original phase plan.
 
 ## Implemented Components
 1. **Context Fingerprinting (`selfheal/learning/contracts.py`, `selfheal/learning/fingerprint.py`)**:

@@ -1,8 +1,8 @@
-# Slime security model (Phases 1–2)
+# Slime security model
 
-Monitoring is read-only with respect to targets. Phase 2 adds separate typed
-execution APIs; dry-run is true by default and the runtime repair CLI is Phase 3.
-No LLM or cloud transport is implemented yet. Logs, labels, names, file contents
+Monitoring is read-only with respect to targets. Typed execution is dry-run by default.
+Local and optional cloud diagnosis are implemented, with all model outputs subject to
+the same deterministic policy. Logs, labels, names, file contents
 and probe responses are untrusted data, never instructions. Evidence cannot grant
 approval, change configuration or mark a diagnosis trustworthy. Operator code,
 inventory configuration and local database ownership are trusted.
@@ -24,6 +24,21 @@ Approvals do not bypass invalid output, confidence, kill, dry-run or breaker rul
 Human control APIs are a trusted local boundary, not an authentication service.
 
 SAFE container restart requires a crashed target and actual health verification.
+SAFE managed-process restart is limited to a service with an operator-configured
+absolute executable, working directory and fixed argument list. Slime starts
+that child itself and records its PID and birth time; it cannot adopt an
+unrelated PID. A healthy configured endpoint with no matching owned PID blocks a
+duplicate start. The executable and directory must be regular/non-symlink targets
+in the configured inventory. Immediately before spawn Slime rechecks the exact
+owned-process state and file metadata. It never kills an already running but
+unhealthy process. The child gets a minimal environment (Windows SystemRoot
+only; empty on POSIX) to avoid inheriting Slime's cloud key. Startup readiness
+has a bounded optional grace period; stability verification then checks the
+configured HTTP/TCP probe, or liveness alone if none exists. There is no generic
+rollback after spawn, so a failed verification escalates and the owned child
+may remain running. An operator with write access to the configured executable
+or directory could race path validation and launch; protect these paths with OS
+permissions. SQLite ownership records also rely on protected local DB access.
 Service restart/reload, process termination and exact dangling-image removal
 require approval. Image rollback is refused by the native backend until a trusted
 deployment-specific adapter can preserve its deployment configuration. No broad
@@ -58,8 +73,8 @@ Every tool output is truncated, redacted and JSON-escaped inside an UNTRUSTED_DA
 block. Fake closing delimiters cannot escape this block. Tests cover fake JSON,
 fake tools, malicious names, oversized inputs and Unicode/control tricks. The
 deterministic gate rejects injected actions independent of any prompt. D3 prompt
-templates and actual model-loop adversarial tests belong to Phase 5; delimiters
-alone are not a guarantee against model persuasion.
+and model-loop adversarial tests exercise these boundaries. Delimiters alone are
+not a guarantee against model persuasion; the typed policy is the final gate.
 
 Read-only workers have caller deadlines and admit no replacement worker while
 one remains stuck; late output is discarded. Native subprocesses have their own
@@ -85,22 +100,33 @@ actor labels and recovery metadata are recursively sanitized. Config contents
 are hashed rather than stored. Never put credentials in configuration, names,
 paths or endpoint URLs.
 
-### Zero-Secrets Invariant (Phase 8)
+### Cloud boundary
 - Configuration models enforce a strict `@model_validator(mode="before")` that
   rejects any mapping key or value containing `api_key`, `secret`, `token`, `password`,
   `sk-`, `ghp_`, or private key blocks.
-- Cloud API keys (`SLIME_CLOUD_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) must
-  be supplied exclusively via process environment variables (`os.environ`).
-- The D4 Cloud Investigator only transmits bounded, summary-level incident context
-  pre-sanitized with `[REDACTED:<hash>]` tokens. Raw logs are never transmitted.
-- Cloud invocations are bounded by hourly call limits and USD spend caps (`CloudBudget`),
-  audited in SQLite, and degrade cleanly to local baselines on refusal or network failure.
+- Only `SLIME_CLOUD_API_KEY` is read from the process environment. It is never
+  put in configuration or the event database.
+- The D4 adapter sends service aliases, hashed template IDs and abstract signal
+  types to the explicitly configured HTTPS endpoint. Raw logs and file contents
+  are excluded from the outbound message. Every reserved call stores the exact
+  outbound payload and byte count in SQLite audit data.
+- A monthly call and estimated-spend reservation is persisted before each request;
+  an hourly call cap also applies. The cost is a configured worst-case *estimate*:
+  the provider can bill differently. Use provider-side limits for a hard bill cap.
+- Redaction is best effort. Secrets embedded in unrecognized metric labels or
+  unusual encodings can still leak context; do not enable cloud for sensitive
+  inventories without reviewing the abstract outbound schema.
 
-### Dashboard & Notification Boundaries (Phase 9)
+### Dashboard and notification boundaries
 - The FastAPI dashboard binds strictly to `127.0.0.1` (`localhost`).
 - Binding to `0.0.0.0` or external network interfaces is rejected with a fatal error.
 - A custom Starlette middleware verifies incoming client IP addresses, immediately
   returning HTTP 403 Forbidden for non-localhost clients.
+- Each dashboard start generates an in-memory random token printed to the local
+  terminal. POST approvals require that token, same-origin and Host validation,
+  a staged proposal digest, an active incident and a fresh policy evaluation.
+  The token is absent from configuration and SQLite; local users who can read
+  the terminal or browser session can authorize approval-tier actions.
 - Multi-channel notifications (desktop toasts, loggers) run in non-blocking try/except
   guards with sanitized arguments and timeouts, ensuring notification failures never
   delay or interrupt remediation actions.

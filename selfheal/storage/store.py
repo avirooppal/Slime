@@ -20,6 +20,11 @@ CREATE TABLE IF NOT EXISTS incident_events (
  PRIMARY KEY(incident_id, event_id));
 CREATE TABLE IF NOT EXISTS templates (id TEXT PRIMARY KEY, template TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS checkpoints (name TEXT PRIMARY KEY, payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS cloud_calls (
+ id TEXT PRIMARY KEY, month TEXT NOT NULL, hour TEXT NOT NULL,
+ reserved_usd REAL NOT NULL, sent_summary TEXT NOT NULL,
+ bytes_sent INTEGER NOT NULL, result TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS cloud_calls_month ON cloud_calls(month);
 CREATE TABLE IF NOT EXISTS audit_log (
  id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL,
  subject TEXT NOT NULL, rule TEXT NOT NULL, detail TEXT NOT NULL);

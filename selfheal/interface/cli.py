@@ -2,8 +2,10 @@
 
 import getpass
 import importlib.util
+import os
 import platform
 import shutil
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -16,6 +18,7 @@ from rich.table import Table
 
 from selfheal.config import Config, load_config
 from selfheal.models import State
+from selfheal.remediation.registry import default_registry
 from selfheal.runtime import Coordinator
 from selfheal.safety.contracts import Proposal
 from selfheal.safety.state import SafetyState, proposal_digest
@@ -93,6 +96,11 @@ def doctor(config: Path = Path("config.yaml")) -> None:
             table.add_row(
                 f"Health ({s.name})", "configured", "endpoint or PID explicitly configured"
             )
+        if s.managed_process is not None:
+            table.add_row(
+                f"Managed ({s.name})", "configured",
+                "fixed executable; liveness checked; dry-run and policy gate apply",
+            )
     for extra, module in [
         ("docker", "docker"),
         ("dashboard", "fastapi"),
@@ -111,27 +119,40 @@ def doctor(config: Path = Path("config.yaml")) -> None:
         ollama = "reachable"
     except httpx.HTTPError:
         ollama = "unavailable (optional)"
-    table.add_row("Ollama", ollama, settings.ollama_model + "; D3 active in Phase 5")
-    table.add_row("Diagnosis D1/D2/D3", "active", "D1 memory, D2 runbooks, and D3 local LLM")
-    d4_d5_status = "active" if (settings.cloud_enabled or settings.laya_enabled) else "disabled"
-    d4_d5_reason = (
-        "Phase 8; optional cloud/Laya active"
-        if (settings.cloud_enabled or settings.laya_enabled)
-        else "Phase 8; optional cloud/Laya not implemented / disabled by default"
+    table.add_row("Ollama / D3", ollama, settings.ollama_model + "; optional local model")
+    table.add_row("Diagnosis D1/D2", "active", "local memory and deterministic runbooks")
+    cloud_ready = bool(
+        settings.cloud_enabled and settings.cloud_base_url and settings.cloud_model
+        and settings.cloud_max_calls_per_month and settings.cloud_max_spend_usd
+        and settings.cloud_estimated_max_cost_per_call_usd
+        and os.environ.get("SLIME_CLOUD_API_KEY")
     )
-    table.add_row("D4/D5", d4_d5_status, d4_d5_reason)
+    table.add_row("D4 Cloud", "configured" if cloud_ready else "inactive",
+                  "opt-in endpoint, env key and explicit monthly reservation caps required")
+    from selfheal.diagnosis.laya_classifier import LayaClassifier
+    from selfheal.storage.store import Store
+    if settings.laya_enabled:
+        check_store = Store(":memory:")
+        laya_gate_passed = LayaClassifier(settings, check_store).evaluation() is not None
+        check_store.close()
+    else:
+        laya_gate_passed = False
+    laya_ready = bool(settings.laya_enabled and laya_gate_passed and importlib.util.find_spec("laya"))
+    table.add_row("D5 Laya", "eligible" if laya_ready else "inactive",
+                  "requires installed Router and passing held-out accuracy, calibration and latency gate")
     table.add_row(
         "Safety policy",
         "active",
         "deterministic; confidence >= " + str(settings.safety.minimum_confidence),
     )
     table.add_row(
-        "Action registry", "9 typed actions", "SAFE/APPROVAL; exact live inventory required"
+        "Action registry", f"{len(default_registry().actions)} typed actions",
+        "SAFE/APPROVAL; exact live inventory required"
     )
     table.add_row(
         "Execution",
         "dry-run (default)" if settings.dry_run else "active mutation",
-        "runtime CLI wired in Phase 3",
+        "live execution requires explicit --no-dry-run or config change",
     )
     console.print(table)
 
@@ -140,7 +161,7 @@ def doctor(config: Path = Path("config.yaml")) -> None:
 def run(
     config: Path = Path("config.yaml"),
     dry_run: Annotated[bool | None, typer.Option("--dry-run/--no-dry-run", help="Override dry-run mode")] = None,
-    once: Annotated[bool, typer.Option("--once", help="Run one cycle and exit")] = True,
+    once: Annotated[bool, typer.Option("--once", help="Run one cycle and exit")] = False,
 ) -> None:
     """Run polling, correlation, diagnosis, policy, execution and postmortem."""
     try:
@@ -164,10 +185,9 @@ def run(
 
     coordinator = Coordinator(settings)
     try:
-        cycles = 1 if once else 999999
-        for _ in range(cycles):
+        while True:
             results = coordinator.step()
-            if not results:
+            if not results and once:
                 console.print("No active incidents requiring remediation.")
             for incident, diagnosis, proposals, exec_res in results:
                 console.print(f"\n[bold]Incident {incident.id}[/bold] (State: `{incident.state.value}`)")
@@ -195,6 +215,11 @@ def run(
                         console.print(
                             f"  Verification: {'[green]Stable[/green]' if v.stable else '[red]Unstable[/red]'} ({v.reason})"
                         )
+            if once:
+                break
+            time.sleep(settings.poll_seconds)
+    except KeyboardInterrupt:
+        console.print("Monitoring stopped by operator.")
     finally:
         coordinator.close()
 
@@ -446,8 +471,9 @@ def chaos(
     config: Path = Path("config.yaml"),
     output: Annotated[Path, typer.Option("--output", help="Path to export JSONL ground-truth records")] = Path("chaos_results.jsonl"),
     scratch_dir: Annotated[Path, typer.Option("--scratch", help="Private directory for bounded experiments")] = Path("scratch/chaos"),
+    docker_demo: Annotated[bool, typer.Option("--docker-demo", help="Inject only into the labeled slime-demo Compose project")] = False,
 ) -> None:
-    """Run offline non-destructive chaos experiments and export JSONL ground truth."""
+    """Run local chaos or explicitly opt in to the disposable Docker demo."""
     try:
         settings = load_config(config)
     except (OSError, ValueError, yaml.YAMLError) as e:
@@ -457,9 +483,16 @@ def chaos(
     from selfheal.chaos.harness import ChaosHarness
     from selfheal.chaos.scenarios import adversarial_scenarios, standard_scenarios
 
+    if docker_demo:
+        from selfheal.chaos.docker_harness import DEMO_CONTAINERS, DockerDemoHarness, demo_scenarios
+
+        configured = {s.name: s.container_name for s in settings.services}
+        if any(configured.get(name) != target for name, target in DEMO_CONTAINERS.items()):
+            console.print("Docker demo requires worker/web services with exact slime-demo container names.")
+            raise typer.Exit(1)
     coordinator = Coordinator(settings)
-    harness = ChaosHarness(scratch_dir, coordinator)
-    all_scenarios = standard_scenarios() + adversarial_scenarios()
+    harness = DockerDemoHarness(scratch_dir, coordinator) if docker_demo else ChaosHarness(scratch_dir, coordinator)
+    all_scenarios = demo_scenarios() if docker_demo else standard_scenarios() + adversarial_scenarios()
     outcomes = []
 
     table = Table(title="Chaos Experiments Summary")
@@ -541,12 +574,13 @@ def bench(
     table = Table(title="\nBenchmark Evaluation by Tier")
     table.add_column("Tier", style="bold", no_wrap=True)
     table.add_column("Total", justify="right")
-    table.add_column("Detection", justify="right")
-    table.add_column("Diag Acc", justify="right")
-    table.add_column("Repair Rate", justify="right")
-    table.add_column("FP Rate", justify="right")
-    table.add_column("Unsafe Attr", justify="right")
-    table.add_column("Latency (ms)", justify="right")
+    table.add_column("Detect", justify="right")
+    table.add_column("Diag", justify="right")
+    table.add_column("Fix", justify="right")
+    table.add_column("Verified", justify="right")
+    table.add_column("FP", justify="right")
+    table.add_column("Unsafe", justify="right")
+    table.add_column("ms", justify="right")
 
     for tier_name, m in report.tiers.items():
         unsafe_styled = f"[green]{m.unsafe_attempt_rate:.1%}[/green]" if m.unsafe_attempts == 0 else f"[red]{m.unsafe_attempt_rate:.1%}[/red]"
@@ -555,13 +589,38 @@ def bench(
             str(m.total_scenarios),
             f"{m.detection_rate:.1%}",
             f"{m.diagnosis_accuracy:.1%}",
-            f"{m.repair_success_rate:.1%}",
+            f"{m.correct_fix_rate:.1%}" if m.total_scenarios else "N/A",
+            "N/A",
             f"{m.false_positive_rate:.1%}",
             unsafe_styled,
             f"{m.mean_latency_ms:.1f}",
         )
 
     console.print(table)
+
+
+@app.command()
+def eval(
+    dataset: Annotated[Path, typer.Option("--dataset", help="Held-out labeled JSONL file")],
+    output: Annotated[Path, typer.Option("--output", help="Evaluation report JSON")],
+    config: Path = Path("config.yaml"),
+) -> None:
+    """Compare optional Laya with local memory/runbooks on held-out cases."""
+    from selfheal.eval.laya_gate import evaluate_laya
+
+    try:
+        settings = load_config(config)
+        store = Store(":memory:")
+        try:
+            report = evaluate_laya(dataset, settings, store)
+        finally:
+            store.close()
+        output.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+        console.print(report.model_dump_json(indent=2), markup=False)
+        console.print("Configure laya_eval_report and a required accuracy margin to enable D5.")
+    except (OSError, ValueError, ImportError) as exc:
+        console.print(f"Laya evaluation unavailable: {type(exc).__name__}: {exc}", markup=False)
+        raise typer.Exit(1) from None
 
 
 @app.command()

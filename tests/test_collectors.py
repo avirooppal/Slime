@@ -198,7 +198,7 @@ def test_init_doctor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     )
     result = runner.invoke(app, ["doctor", "--config", str(path)])
     assert result.exit_code == 0, result.output
-    assert "not implemented" in result.output and "unavailable" in result.output
+    assert "D4 Cloud" in result.output and "unavailable" in result.output
 
 
 def test_subprocess_timeout() -> None:

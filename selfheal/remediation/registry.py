@@ -27,9 +27,10 @@ class ActionRegistry:
 
 
 def default_registry() -> ActionRegistry:
-    """Declare all nine requested actions with conservative approved risk tiers."""
+    """Declare requested actions plus owned-process recovery with fixed risk tiers."""
     definitions = [
         ("restart_container", Risk.SAFE, "container"),
+        ("restart_managed_process", Risk.SAFE, "managed_process"),
         ("restart_service", Risk.APPROVAL, "service"),
         ("clear_tmp_files", Risk.SAFE, "tmp_file"),
         ("rotate_logs", Risk.SAFE, "log_file"),

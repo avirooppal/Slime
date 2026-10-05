@@ -28,6 +28,10 @@ class RunbookEngine:
         roots = set(incident.root_candidates)
         downstream = set(incident.downstream)
 
+        managed_candidate = self._check_managed_process_failure(incident, events, roots)
+        if managed_candidate:
+            candidates.append(managed_candidate)
+
         # 1. Container crash / OOM rule
         crash_candidate = self._check_container_crash(incident, events, roots)
         if crash_candidate:
@@ -74,6 +78,27 @@ class RunbookEngine:
             candidates=candidates,
             notes=notes or ["D2 runbook rules matched"],
         )
+
+    def _check_managed_process_failure(
+        self, incident: Incident, events: list[Event], roots: set[str]
+    ) -> CandidateCause | None:
+        """Restart only a configured owned child with a failed liveness observation."""
+        for event in events:
+            service = self.service_map.get(event.service)
+            if (event.kind != Kind.HEALTH or event.source != "managed_process"
+                or event.attributes.get("healthy") is not False
+                or service is None or service.managed_process is None):
+                continue
+            is_root = event.service in roots or not roots
+            return CandidateCause(
+                hypothesis=f"Owned process for {event.service} is absent or exited",
+                service=event.service, confidence=0.96 if is_root else 0.80,
+                evidence_event_ids=[event.id], tier=DiagnosisTier.D2_RUNBOOK,
+                proposed_action="restart_managed_process",
+                proposed_params={"target": f"managed.{event.service}"},
+                rationale="Configured Slime-owned process failed an identity-bound liveness check",
+            )
+        return None
 
     def _check_container_crash(
         self, incident: Incident, events: list[Event], roots: set[str]

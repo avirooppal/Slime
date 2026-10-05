@@ -75,23 +75,15 @@ class TrainTicketAdapter(DatasetAdapter):
         return "Apache-2.0"
 
     def is_available(self) -> bool:
-        return self.data_dir.exists() and any(self.data_dir.glob("*.json"))
+        return False
 
     def load_scenarios(self) -> list[Scenario]:
-        if not self.is_available():
-            raise FileNotFoundError(
-                f"Train-Ticket dataset traces not found at {self.data_dir}. "
-                "Download public traces or place json traces in benchmarks/data/train-ticket."
-            )
-        # Load external scenarios if files are provided
-        return []
+        raise NotImplementedError("Train-Ticket trace schema and scoring adapter are not implemented")
 
     def documentation(self) -> str:
-        if self.is_available():
-            return f"Train-Ticket dataset active at {self.data_dir} (Apache-2.0)."
         return (
             f"Train-Ticket traces not found at {self.data_dir}. "
-            "No public traces downloaded; running without invented benchmark claims."
+            "No public trace adapter implemented; running without invented benchmark claims."
         )
 
 
@@ -110,20 +102,13 @@ class AIOpsChallengeAdapter(DatasetAdapter):
         return "Academic Research Use / CC BY-NC 4.0"
 
     def is_available(self) -> bool:
-        return self.data_dir.exists() and any(self.data_dir.glob("*.csv"))
+        return False
 
     def load_scenarios(self) -> list[Scenario]:
-        if not self.is_available():
-            raise FileNotFoundError(
-                f"AIOps Challenge dataset not found at {self.data_dir}. "
-                "Dataset requires academic registration; no mock data invented."
-            )
-        return []
+        raise NotImplementedError("AIOps Challenge trace schema and scoring adapter are not implemented")
 
     def documentation(self) -> str:
-        if self.is_available():
-            return f"AIOps Challenge dataset active at {self.data_dir}."
         return (
             f"AIOps Challenge dataset not found at {self.data_dir}. "
-            "Requires upstream academic registration; documented honestly without synthetic claims."
+            "Requires upstream access and a verified parser; no synthetic public benchmark claims."
         )

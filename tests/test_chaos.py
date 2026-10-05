@@ -87,6 +87,23 @@ def test_temp_file_fill_bounded_and_cleaned(chaos_rig):
     assert len(list(harness.workspace.glob("*.dat"))) == 0
 
 
+def test_chaos_rejects_large_fill_and_kills_only_owned_child(chaos_rig):
+    """A hostile scenario cannot exhaust disk or nominate a host PID for termination."""
+    harness, _coordinator, _tmp_path = chaos_rig
+    oversized = Scenario(name="../../outside", fault_type=FaultType.TEMP_FILE_FILL,
+                         target_service="host", expected_root_cause="host",
+                         parameters={"size_kb": 1025})
+    with pytest.raises(ValueError, match="between 1 and 1024"):
+        harness.inject(oversized)
+    child_fault = Scenario(name="owned_child", fault_type=FaultType.PROCESS_KILL,
+                           target_service="worker", expected_root_cause="worker",
+                           parameters={"pid": 1})
+    event = harness.inject(child_fault)
+    assert event.service == "worker"
+    assert len(harness.owned_processes) == 1
+    assert harness.owned_processes[0].poll() is not None
+
+
 def test_container_crash_scenario_lifecycle(chaos_rig):
     """End-to-end container crash scenario inject -> detect -> correlate -> diagnose -> policy -> postmortem."""
     harness, _coordinator, _tmp_path = chaos_rig
