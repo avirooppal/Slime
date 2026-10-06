@@ -11,3 +11,4 @@ dist/
 *.sqlite*
 config.yaml
 scratch/
+.slime/

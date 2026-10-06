@@ -1,47 +1,135 @@
-# Slime
+# Slime developer documentation
 
-Slime is a local-first, single-process DevOps incident agent. It polls explicitly
-configured logs, host metrics, health checks and changes; correlates incidents;
-diagnoses with local retrieval and runbooks; proposes typed fixes; and executes
-only actions allowed by a deterministic safety policy. It works offline without
-Docker, a model, a GPU or an API key. Live mutation is **off by default**.
+Slime is a local-first self-healing DevOps agent for explicitly configured
+services. It monitors signals, groups incidents, diagnoses likely causes,
+proposes typed repairs, applies a deterministic safety policy, and verifies recovery.
 
-The verified Docker-free repair path restarts a **Slime-owned** child process from
-an operator-specified executable and argument list, then checks health for a
-stability window. It does not adopt arbitrary PIDs or restart a running but
-unhealthy process. See [current validation](docs/managed-process-validation.md)
-and [security boundaries](SECURITY.md) before enabling live repair.
+The local core needs **Python 3.10+**. Docker, a model, a GPU and API keys are
+optional. **Repairs are dry-run by default.** The verified native recovery path
+starts a stopped or crashed process that Slime is configured to own. Slime does
+not fix arbitrary application bugs or automatically discover your infrastructure.
 
-## Set up locally
+## Install from source
 
-Python 3.10+ is required. From this repository:
+```sh
+git clone https://github.com/avirooppal/Slime.git
+cd Slime
+```
+
+Windows PowerShell:
 
 ```powershell
 py -3 -m venv .venv
 .venv\Scripts\python -m pip install -e ".[dev]"
-.venv\Scripts\selfheal init
-.venv\Scripts\selfheal doctor
-.venv\Scripts\selfheal run --once
+.venv\Scripts\Activate.ps1
 ```
 
-On Linux/macOS, use `python3 -m venv .venv`, `.venv/bin/python` and
-`.venv/bin/selfheal`. The distribution is named `slime-selfheal`; it is not
-published to PyPI. `pip install selfheal` refers to an unrelated package.
+Linux/macOS:
 
-`init` writes `config.yaml` without overwriting an existing file. Edit that
-file to name only the services, files and endpoints Slime should observe. The
-generated config and SQLite database are local operator state and are ignored
-by Git. The annotated [example config](config.example.yaml) lists available
-settings.
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+source .venv/bin/activate
+```
 
-For continuous monitoring, run `selfheal run`. It polls at `poll_seconds` until
-Ctrl+C. `--once` runs one cycle. Both commands remain dry-run unless you
-explicitly set `dry_run: false` or pass `--no-dry-run`.
+Commands below assume this environment is activated. If activation is unavailable,
+use `.venv\Scripts\slime` on Windows or `.venv/bin/slime` on Linux/macOS from
+the repository root. `python -m selfheal` is another entry point; the legacy
+`selfheal` command remains compatible with `slime`.
 
-## Configure a Docker-free repair
+The distribution is `slime-selfheal` and is not published to PyPI.
+`pip install selfheal` installs an unrelated package. Omit `[dev]` when you do
+not need the test and lint tools.
 
-This example is for a service Slime is allowed to start and own. Use absolute
-paths and a health endpoint that reflects application readiness:
+## First run: monitor your application
+
+From your application's directory, name the sources Slime should observe:
+
+```sh
+slime agent --health http://localhost:8000/health --log app.log
+```
+
+Use a real readiness endpoint for your application. Either `--health` or `--log`
+can be used alone; repeat `--log` for additional files. A missing log file may
+be created later by the application.
+
+Slime writes `.slime/config.yaml`, stores SQLite state beside it, and starts
+polling. Add `.slime/` to your application's `.gitignore`. Subsequent runs reuse
+the saved configuration:
+
+```sh
+slime agent
+```
+
+Press Ctrl+C to stop monitoring. Use `--once` for one cycle. Its exit code reports
+command completion, not a CI assertion that all services are healthy.
+
+Existing configuration is never overwritten by new target options. Edit the
+saved file or supply a separate `--config PATH` to create another setup. An
+endpoint or log file grants observation only; it does not enable process restarts.
+
+## Try a real recovery locally
+
+The included playground is a disposable HTTP service. It begins offline so you
+can observe detection, a dry-run proposal, and actual recovery:
+
+```sh
+cd examples/playground
+python setup.py
+slime agent --once
+```
+
+Expect `restart_managed_process` and the `dry_run` policy rule. The application
+stays offline. Enable execution for a single cycle:
+
+```sh
+slime agent --no-dry-run --once
+python check.py
+```
+
+Expect execution `success`, verification `Stable`, and healthy JSON containing
+the app's PID and uptime. `check.py` also prints the browser-accessible health
+URL. The example uses a five-second stability window; the normal default is
+120 seconds. Optional diagnosis connection attempts may add startup latency.
+
+Inspect the incident, then stop the disposable service:
+
+```sh
+slime incidents --config .slime/config.yaml
+python check.py stop
+```
+
+Omit `--once` to keep monitoring. Ctrl+C stops the agent, **not its managed child**;
+stop monitoring before using `check.py stop`. The stop helper checks the child's
+recorded PID and birth time. Immediate repeated failures can trigger cooldown or
+flapping protection; the example leaves these protections enabled.
+
+The playground uses a dynamically selected loopback port, its own database and
+configuration, and preserves existing setup. See [the playground guide](examples/playground/README.md)
+for running a fresh experiment.
+
+## Configure managed processes
+
+In a fresh application directory:
+
+```sh
+slime agent --name worker --executable python --arg worker.py
+```
+
+This resolves the executable and saves a fixed launch specification. Use
+`--arg=-m` for arguments beginning with a dash; repeat `--arg` for each argument.
+`--cwd` selects the child working directory and base for relative log paths.
+Review the generated configuration before enabling execution:
+
+```sh
+slime agent --no-dry-run
+```
+
+The CLI override applies only to that run. It does not save `dry_run: false`.
+Managed children receive a minimal environment (Windows SystemRoot only; empty
+on POSIX), so they do not inherit shell secrets or the agent's cloud key.
+
+For an existing configuration, a managed service looks like this:
 
 ```yaml
 services:
@@ -54,78 +142,130 @@ services:
     http_url: http://127.0.0.1:9000/health
 ```
 
-Run `selfheal doctor`, then `selfheal run --once` to review the proposal. After
-reviewing the exact command, paths and health probe, `selfheal run --no-dry-run`
-allows policy-approved repair. Slime stores the child PID and birth time, refuses
-a duplicate start if the endpoint is already healthy, and requires the probe to
-pass throughout the stability window (120 seconds by default). Without an
-HTTP/TCP probe, it can verify liveness only. The child receives a minimal
-environment; put required non-secret settings in the fixed launch configuration.
+Executable and working-directory paths must be absolute. Slime records PID and
+birth time, refuses duplicate startup when an unowned endpoint is already
+healthy, and verifies the configured probe after startup. Without HTTP/TCP
+probes it verifies process liveness only. It cannot adopt arbitrary PIDs or
+restart an already-running unhealthy process.
 
-## How the code is organized
+## Configuration and commands
 
-| Area | Responsibility |
-|---|---|
-| `selfheal/collectors`, `signals` | Read configured sources; mine log templates and detect anomalies. |
-| `selfheal/correlator`, `storage` | Group events by time/dependencies; persist incidents and audit records in SQLite. |
-| `selfheal/diagnosis`, `learning` | BM25 memory, runbooks, bounded read-only investigation, verified-outcome learning. |
-| `selfheal/planner`, `safety` | Rank typed proposals; apply inventory, confidence, dry-run, cooldown, breaker and approval rules. |
-| `selfheal/remediation`, `verifier` | Dispatch registered actions; check stability and escalate failures. |
-| `selfheal/interface`, `chaos`, `eval` | CLI/dashboard, isolated fault harness and benchmark/evaluation commands. |
-
-`selfheal/runtime.py` wires one polling and remediation cycle. Keep collectors
-read-only and independent. Diagnostic tools live in a separate registry from
-mutation actions. Log text, metric labels, container names and file contents are
-untrusted data; they never authorize an action. Model output is validated and
-still passes the same deterministic policy.
-
-The baseline diagnosis is D1 local retrieval plus D2 runbooks. D3 Ollama at
-`127.0.0.1:11434` is optional. D4 cloud and D5 Laya are disabled unless
-configured; the latter also needs a passing held-out evaluation. Optional
-install extras are `[docker]`, `[dashboard]`, `[embed]`, `[laya]` and `[cloud]`.
-Missing extras should degrade without stopping the local core.
-
-## Operator commands
+`slime agent` defaults to `.slime/config.yaml`. Other operator commands default
+to `config.yaml`, so pass the agent configuration explicitly:
 
 | Command | Purpose |
-|---|---|
-| `selfheal doctor` | Show configured collectors, optional tiers and execution mode. |
-| `selfheal run [--once]` | Monitor, diagnose, plan and apply policy. |
-| `selfheal status` / `selfheal incidents` | Inspect safety state and incident history. |
-| `selfheal dry-run`, `kill-switch`, `reset-circuit` | Manage trusted local safety controls. |
-| `selfheal approve`, `reconcile` | Approve a staged action or resolve an interrupted attempt. |
-| `selfheal chaos`, `bench`, `eval` | Run isolated regression scenarios and evaluations. |
-| `selfheal dashboard` | Start the optional loopback-only UI with a fresh approval token. |
+| --- | --- |
+| `slime doctor --config .slime/config.yaml` | Inspect configured sources, diagnosis tiers and execution mode. |
+| `slime status --config .slime/config.yaml` | Inspect kill switch, circuit breaker, rate limits and pending actions. |
+| `slime incidents --config .slime/config.yaml` | Read incident history and optional postmortems. |
+| `slime run --config .slime/config.yaml --once` | Run an existing configuration for one cycle. |
+| `slime preview` | Display the terminal design with labeled sample metrics. |
+| `slime approve`, `reconcile` | Approve a staged proposal or reconcile an interrupted action. |
+| `slime dry-run`, `kill-switch`, `reset-circuit` | Manage local safety controls. |
+| `slime chaos`, `bench`, `eval` | Run fault scenarios and evaluation tools. |
 
-Use `selfheal <command> --help` for arguments. The dashboard needs
-`pip install -e ".[dashboard]"`; Docker demo faults need `[docker]` and the
-optional [Compose file](docker-compose.yml). `docs/demo/` is part of that demo.
+Use `slime COMMAND --help` for arguments. For manual multi-service setup, run
+`slime init`, edit the generated `config.yaml`, then run `slime doctor` and
+`slime run --once`. The [annotated configuration](config.example.yaml) describes
+available settings. Relative paths in manually authored configurations should
+be reviewed against the directory from which you run Slime; absolute paths are
+recommended for repeatable operation.
 
-## Develop and verify
+## Preview and dashboard
 
-Run the gate after changes (use `.venv/bin/` on Linux/macOS):
+```sh
+slime preview
+slime preview --output scratch/slime-preview.svg
+slime preview --output scratch/slime-preview.html
+```
 
-```powershell
-.venv\Scripts\python -m pytest -q -ra
-.venv\Scripts\ruff check selfheal tests
-.venv\Scripts\mypy selfheal --ignore-missing-imports
-.venv\Scripts\python -m pip check
+The terminal preview is a static design with **sample data**, not live telemetry.
+It shows service health, incidents, verified repairs, recovery time, host
+resources, safety controls and recent activity. It does not start services or
+read your database.
+
+The optional browser dashboard reads configured local agent state:
+
+```sh
+# Install from the repository root.
+python -m pip install -e '.[dashboard]'
+# Run from the application directory, or use an absolute config path.
+slime dashboard --config .slime/config.yaml
+```
+
+Open `http://127.0.0.1:8080`. Run the agent separately to collect observations.
+The dashboard binds to loopback and uses a fresh approval token. It is separate
+from the terminal preview.
+
+## Runtime architecture
+
+One process coordinates the following stages in `selfheal/runtime.py`:
+
+1. Collect configured health, log, host-metric and change signals.
+2. Detect anomalies and correlate related events into incidents.
+3. Diagnose using local retrieval, runbooks and optional model tiers.
+4. Rank typed action proposals and evaluate the deterministic safety policy.
+5. Execute permitted actions, verify stability, and record outcomes/postmortems.
+
+| Source directory | Responsibility |
+| --- | --- |
+| `selfheal/collectors`, `signals` | Read sources, mine log templates and detect anomalies. |
+| `selfheal/correlator`, `storage` | Correlate dependencies and persist incidents/audit records in SQLite. |
+| `selfheal/diagnosis`, `learning` | BM25 retrieval, runbooks, bounded investigation and verified-outcome learning. |
+| `selfheal/planner`, `safety` | Rank proposals; enforce inventory, confidence, approval and execution limits. |
+| `selfheal/remediation`, `verifier` | Dispatch registered actions and verify stability. |
+| `selfheal/interface` | CLI onboarding, terminal preview and optional browser dashboard. |
+| `selfheal/chaos`, `eval` | Isolated scenarios and evaluation tooling. |
+
+D1 local retrieval and D2 runbooks form the baseline. D3 Ollama is optional at
+`127.0.0.1:11434`; D4 cloud and D5 Laya require explicit configuration. Laya
+also requires a passing held-out evaluation. Optional install extras are
+`[docker]`, `[dashboard]`, `[embed]`, `[laya]` and `[cloud]`. Missing optional
+components should degrade without disabling the local core.
+
+## Development and validation
+
+From the repository root with `[dev]` installed:
+
+```sh
+python -m pytest -q -ra
+python -m ruff check selfheal tests
+python -m mypy selfheal --ignore-missing-imports
+python -m pip check
 git diff --check
 ```
 
-The latest Windows gate passed **187 tests**, with four platform-specific skips;
-see the [validation record](docs/managed-process-validation.md) for exact output.
-Historical phase gates remain in `docs/phase*-validation.md`. The standalone
-[architecture](docs/architecture.mmd), [incident state diagram](docs/incident-states.mmd),
-[benchmark notes](docs/public-benchmarks.md) and [security model](SECURITY.md)
-provide the details that should not crowd this README.
+The Windows validation on 2026-10-06 passed **199 tests**, with four platform
+skips; lint, type and dependency checks passed. The playground was separately
+checked with real HTTP startup, stability verification and identity-bound
+cleanup. This is local validation, not a production reliability claim.
+GitHub Actions defines Python 3.10/3.12 jobs on Ubuntu and Windows.
 
-## Current limits
+When extending Slime, keep collectors read-only and independent. Diagnostic
+tools and mutation actions have separate registries. Add repairs as typed
+registered actions with inventory validation, policy checks and recovery
+verification. Evidence and model output must never grant execution authority.
 
-The real local-process recovery path is tested. Docker/systemd repair and POSIX
-file actions have not been exercised against disposable live targets on this
-Windows host. The generic image rollback action is intentionally unavailable.
-The chaos benchmark is regression data, not a public benchmark score or proof of
-production recovery time. Cloud redaction is best-effort, and Laya has not been
-validated with a real checkpoint here. Keep live repair confined to services
-whose ownership, executable, health probe and failure mode you have reviewed.
+## Safety boundaries and current limits
+
+Dry-run, minimum confidence, explicit inventory, approvals, cooldown, hourly
+budgets, the kill switch and circuit breaker govern execution. Logs, names,
+files, probe responses and model output are untrusted evidence. See
+[SECURITY.md](SECURITY.md) for the full trust model.
+
+The local managed-process recovery path is tested. Docker/systemd repair and
+POSIX file mutations have not been exercised against disposable live targets
+on this Windows host. Generic image rollback is unavailable. Cloud redaction
+is best-effort, and Laya has not been validated here with a real checkpoint.
+Failed startup verification may leave an owned child running and escalate for
+operator attention; there is no general rollback for a process launch.
+
+## Further documentation
+
+- [Managed-process validation](docs/managed-process-validation.md)
+- [Architecture source](docs/architecture.mmd)
+- [Incident lifecycle](docs/incident-states.mmd)
+- [Benchmark methodology and limits](docs/public-benchmarks.md)
+- [Optional Docker demo](docker-compose.yml)
+
+Historical implementation gates are recorded in `docs/phase*-validation.md`.

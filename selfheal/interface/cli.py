@@ -42,6 +42,51 @@ def get_current_actor(actor_override: str | None = None) -> str:
 
 
 @app.command()
+def preview(
+    output: Annotated[Path | None, typer.Option(help="Export the preview as .svg or .html")] = None,
+) -> None:
+    """Show the terminal dashboard design with sample data; no agent is started."""
+    from selfheal.interface.preview import show_preview
+
+    try:
+        show_preview(output)
+    except (ValueError, OSError) as error:
+        console.print(f"Cannot render preview: {error}", markup=False)
+        raise typer.Exit(1) from None
+    if output:
+        console.print(f"Preview saved to {output.absolute()}", markup=False)
+
+
+@app.command()
+def agent(
+    config: Path = Path(".slime/config.yaml"),
+    name: str = "app",
+    health: Annotated[str | None, typer.Option(help="HTTP readiness URL to monitor")] = None,
+    log: Annotated[list[Path] | None, typer.Option("--log", help="Log file; repeat for multiple files")] = None,
+    executable: Annotated[str | None, typer.Option(help="Fixed command Slime may own and repair")] = None,
+    arg: Annotated[list[str] | None, typer.Option("--arg", help="One command argument; repeat as needed")] = None,
+    cwd: Annotated[Path, typer.Option(help="Working directory for the app and relative log paths")] = Path("."),
+    dry_run: Annotated[bool | None, typer.Option("--dry-run/--no-dry-run")] = None,
+    once: Annotated[bool, typer.Option(help="Run one cycle and exit")] = False,
+) -> None:
+    """Connect to an app, remember its setup, and start the incident agent."""
+    from selfheal.interface.onboarding import prepare_agent
+
+    try:
+        settings = prepare_agent(config, name, health, log or [], executable, arg or [], cwd)
+    except (OSError, ValueError, yaml.YAMLError) as error:
+        console.print(f"Cannot start agent: {error}", markup=False)
+        raise typer.Exit(1) from None
+    console.print(f"Agent configuration: {config.absolute()}", markup=False)
+    console.print(f"Watching {len(settings.services)} configured service(s).", markup=False)
+    console.print("Next time: slime agent (use the same --config if customized).")
+    console.print(f"Inspect incidents: slime incidents --config \"{config.absolute()}\"", markup=False)
+    if any(s.managed_process for s in settings.services):
+        console.print("Managed commands use a minimal environment. Live repair requires --no-dry-run.")
+    run(config=config, dry_run=dry_run, once=once)
+
+
+@app.command()
 def init(config: Path = Path("config.yaml")) -> None:
     """Detect capabilities and write explicit, dry-run configuration without overwriting."""
     if config.exists():

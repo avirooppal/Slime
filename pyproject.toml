@@ -18,6 +18,7 @@ cloud = []
 dev = ["pytest>=8", "ruff", "mypy", "types-PyYAML", "types-psutil"]
 
 [project.scripts]
+slime = "selfheal.interface.cli:app"
 selfheal = "selfheal.interface.cli:app"
 
 [tool.setuptools.packages.find]
