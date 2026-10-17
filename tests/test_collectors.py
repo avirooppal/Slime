@@ -72,6 +72,77 @@ def test_symlink_escape(tmp_path: Path) -> None:
     store.close()
 
 
+def test_simulated_symlink_and_reparse_point_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise LogTailer symlink redirect guard and paths._not_link symlink/reparse guards without OS symlink privileges."""
+    import stat as stat_mod
+    from types import SimpleNamespace
+
+    from selfheal.safety.paths import PathAccess, _not_link
+
+    first = tmp_path / "first.log"
+    second = tmp_path / "second.log"
+    first.write_text("first\n")
+    second.write_text("secret\n")
+
+    store = Store(":memory:")
+    tailer = LogTailer(str(first), "app", store)
+    assert len(tailer.collect()) == 1
+
+    # Simulate symlink target swap after pinning by returning second's resolved path
+    orig_resolve = Path.resolve
+
+    def redirected_resolve(self_path: Path, strict: bool = False) -> Path:
+        if self_path.name == "first.log":
+            return orig_resolve(second, strict=strict)
+        return orig_resolve(self_path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", redirected_resolve)
+    with pytest.raises(ValueError, match="configured path changed identity"):
+        tailer.collect()
+    monkeypatch.setattr(Path, "resolve", orig_resolve)
+    store.close()
+
+    orig_lstat = Path.lstat
+
+    # Exercise _not_link against simulated POSIX symlink (S_IFLNK)
+    def symlink_lstat(self_path: Path):  # type: ignore[no-untyped-def]
+        real = orig_lstat(self_path)
+        if self_path == first:
+            return SimpleNamespace(
+                st_mode=stat_mod.S_IFLNK | 0o777,
+                st_ino=real.st_ino,
+                st_dev=real.st_dev,
+                st_size=real.st_size,
+                st_file_attributes=0,
+            )
+        return real
+
+    monkeypatch.setattr(Path, "lstat", symlink_lstat)
+    with pytest.raises(ValueError, match="symlink or reparse point is not authorized"):
+        _not_link(first)
+
+    # Exercise _not_link and PathAccess.authorize against simulated Windows reparse point (0x400)
+    def reparse_lstat(self_path: Path):  # type: ignore[no-untyped-def]
+        real = orig_lstat(self_path)
+        if self_path == first:
+            return SimpleNamespace(
+                st_mode=real.st_mode,
+                st_ino=real.st_ino,
+                st_dev=real.st_dev,
+                st_size=real.st_size,
+                st_file_attributes=0x400,
+            )
+        return real
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    access = PathAccess([str(first)])
+    with pytest.raises(ValueError, match="symlink or reparse point is not authorized"):
+        access.authorize(str(first))
+
+
+
 def test_changes(tmp_path: Path) -> None:
     """Baselines and config deploys are distinguished; no raw contents are retained."""
     path = tmp_path / "config"
@@ -270,3 +341,47 @@ def test_process_and_systemd_mock(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert collector.collect()[0].attributes["change"] == "unit"
     store.close()
+
+
+def test_docker_logs_collector() -> None:
+    """DockerLogs tails bounded lines, strips secrets, and persists cursor timestamp."""
+    from selfheal.collectors.docker_logs import DockerLogs
+
+    fake_container = Mock()
+    fake_container.logs.return_value = (
+        b"2026-10-17T03:00:00Z worker started token=secret123\n"
+        b"2026-10-17T03:00:05Z job 42 failed\n"
+    )
+    fake_adapter = Mock()
+    fake_adapter.container.return_value = fake_container
+
+    store = Store(":memory:")
+    collector = DockerLogs("worker-cnt", "worker", store, adapter=fake_adapter)
+    events = collector.collect()
+    assert len(events) == 2
+    assert "secret123" not in events[0].evidence
+    assert store.checkpoint("docker_logs:worker:worker-cnt") is not None
+    store.close()
+
+
+def test_init_scan_discovery(tmp_path: Path) -> None:
+    """`selfheal init --scan-dir` discovers logs, nginx upstreams, dependency map, and critical services."""
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir()
+    (scan_dir / "web.log").write_text("info started\n", encoding="utf-8")
+    (scan_dir / "worker.log").write_text("info ready\n", encoding="utf-8")
+    (scan_dir / "postgres.log").write_text("db ready\n", encoding="utf-8")
+    (scan_dir / "nginx.conf").write_text(
+        "upstream web { server 127.0.0.1:8000; }\n", encoding="utf-8"
+    )
+    cfg_path = tmp_path / "config.yaml"
+    runner = CliRunner()
+    res = runner.invoke(app, ["init", "--config", str(cfg_path), "--scan-dir", str(scan_dir)])
+    assert res.exit_code == 0, res.output
+    cfg = load_config(cfg_path)
+    assert cfg.dry_run is True
+    by_name = {s.name: s for s in cfg.services}
+    assert "nginx" in by_name and "web" in by_name and "worker" in by_name and "postgres" in by_name
+    assert "web" in by_name["nginx"].depends_on
+    assert "worker" in by_name["web"].depends_on
+    assert by_name["postgres"].critical is True

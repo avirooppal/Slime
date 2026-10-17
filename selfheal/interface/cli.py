@@ -1,13 +1,14 @@
 """Environment-aware setup, diagnosis, and CLI commands for Slime."""
 
 import getpass
-import importlib.util
+import json
 import os
 import platform
 import shutil
+import sys
 import time
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import httpx
 import typer
@@ -17,6 +18,12 @@ from rich.panel import Panel
 from rich.table import Table
 
 from selfheal.config import Config, load_config
+from selfheal.interface.dashboard import (
+    build_doctor_report,
+    compute_mode_summary,
+    evaluate_ordered_policy_gates,
+    format_incident_execution_note,
+)
 from selfheal.models import State
 from selfheal.remediation.registry import default_registry
 from selfheal.runtime import Coordinator
@@ -26,6 +33,20 @@ from selfheal.storage.store import Store
 
 app = typer.Typer(help="Slime: local-first, safety-first DevOps incident agent.")
 console = Console()
+
+
+def _use_plain_output() -> bool:
+    """Return True when NO_COLOR is set or stdout is not an interactive TTY."""
+    return bool(os.environ.get("NO_COLOR")) or not sys.stdout.isatty()
+
+
+def _out(text: str, *, style: str | None = None) -> None:
+    """Print one line respecting NO_COLOR and non-TTY streams without narrow table wrapping."""
+    if _use_plain_output() or not style:
+        typer.echo(text)
+    else:
+        console.print(text, style=style, markup=False, soft_wrap=True)
+
 
 
 def get_current_actor(actor_override: str | None = None) -> str:
@@ -42,57 +63,17 @@ def get_current_actor(actor_override: str | None = None) -> str:
 
 
 @app.command()
-def preview(
-    output: Annotated[Path | None, typer.Option(help="Export the preview as .svg or .html")] = None,
+def init(
+    config: Path = Path("config.yaml"),
+    scan_dir: Annotated[Path | None, typer.Option("--scan-dir", help="Optional directory to scan for logs and nginx.conf")] = None,
 ) -> None:
-    """Show the terminal dashboard design with sample data; no agent is started."""
-    from selfheal.interface.preview import show_preview
-
-    try:
-        show_preview(output)
-    except (ValueError, OSError) as error:
-        console.print(f"Cannot render preview: {error}", markup=False)
-        raise typer.Exit(1) from None
-    if output:
-        console.print(f"Preview saved to {output.absolute()}", markup=False)
-
-
-@app.command()
-def agent(
-    config: Path = Path(".slime/config.yaml"),
-    name: str = "app",
-    health: Annotated[str | None, typer.Option(help="HTTP readiness URL to monitor")] = None,
-    log: Annotated[list[Path] | None, typer.Option("--log", help="Log file; repeat for multiple files")] = None,
-    executable: Annotated[str | None, typer.Option(help="Fixed command Slime may own and repair")] = None,
-    arg: Annotated[list[str] | None, typer.Option("--arg", help="One command argument; repeat as needed")] = None,
-    cwd: Annotated[Path, typer.Option(help="Working directory for the app and relative log paths")] = Path("."),
-    dry_run: Annotated[bool | None, typer.Option("--dry-run/--no-dry-run")] = None,
-    once: Annotated[bool, typer.Option(help="Run one cycle and exit")] = False,
-) -> None:
-    """Connect to an app, remember its setup, and start the incident agent."""
-    from selfheal.interface.onboarding import prepare_agent
-
-    try:
-        settings = prepare_agent(config, name, health, log or [], executable, arg or [], cwd)
-    except (OSError, ValueError, yaml.YAMLError) as error:
-        console.print(f"Cannot start agent: {error}", markup=False)
-        raise typer.Exit(1) from None
-    console.print(f"Agent configuration: {config.absolute()}", markup=False)
-    console.print(f"Watching {len(settings.services)} configured service(s).", markup=False)
-    console.print("Next time: slime agent (use the same --config if customized).")
-    console.print(f"Inspect incidents: slime incidents --config \"{config.absolute()}\"", markup=False)
-    if any(s.managed_process for s in settings.services):
-        console.print("Managed commands use a minimal environment. Live repair requires --no-dry-run.")
-    run(config=config, dry_run=dry_run, once=once)
-
-
-@app.command()
-def init(config: Path = Path("config.yaml")) -> None:
-    """Detect capabilities and write explicit, dry-run configuration without overwriting."""
+    """Scan the machine and write explicit, dry-run configuration without overwriting."""
     if config.exists():
         console.print("Configuration exists; refusing to overwrite.", markup=False)
         raise typer.Exit(1)
-    settings = Config(disk_paths=[Path.cwd().anchor])
+    from selfheal.interface.discovery import scan_host
+
+    settings, summary = scan_host(scan_dir)
     config.write_text(
         yaml.safe_dump(settings.model_dump(mode="json"), sort_keys=False), encoding="utf-8"
     )
@@ -100,7 +81,15 @@ def init(config: Path = Path("config.yaml")) -> None:
         f"Created {config.absolute()} on {platform.system()}; dry-run enabled.", markup=False
     )
     console.print(
-        "Configure named log files, services, dependencies and endpoints before monitoring."
+        f"Scanned host: {len(summary.log_files)} log file(s), "
+        f"{len(summary.systemd_units)} systemd unit(s), "
+        f"{len(summary.docker_containers)} Docker container(s), "
+        f"{len(summary.listening_ports)} listening port(s), "
+        f"{len(summary.nginx_upstreams)} nginx upstream(s).",
+        markup=False,
+    )
+    console.print(
+        "Review services to watch, CRITICAL flags, dependency map, and maintenance windows."
     )
     console.print(
         f"journalctl: {'available' if shutil.which('journalctl') else 'unavailable on this host'}"
@@ -109,97 +98,49 @@ def init(config: Path = Path("config.yaml")) -> None:
 
 @app.command()
 def doctor(config: Path = Path("config.yaml")) -> None:
-    """Report enabled sources, missing components and status of diagnosis tiers."""
+    """Report grouped collectors, diagnosis tiers, safety gates, host capabilities, and next step."""
     try:
         settings = load_config(config)
     except (OSError, ValueError, yaml.YAMLError):
-        console.print("Invalid or missing configuration. Run selfheal init or correct config.yaml.")
+        _out("Invalid or missing configuration. Run selfheal init or correct config.yaml.")
         raise typer.Exit(1) from None
-    table = Table("Component", "Status", "Reason")
-    table.add_row(
-        "Host metrics",
-        "active" if settings.metrics_enabled else "disabled",
-        "psutil; aggregate only",
-    )
-    for s in settings.services:
-        for path in s.logs + s.configs:
-            table.add_row(
-                f"File ({s.name})", "active" if Path(path).is_file() else "unavailable", str(path)
-            )
-        if s.journal_unit:
-            table.add_row(
-                f"Journal ({s.name})",
-                "active" if shutil.which("journalctl") else "unavailable",
-                "requires journalctl",
-            )
-            table.add_row(
-                f"Systemd ({s.name})",
-                "active" if shutil.which("systemctl") else "unavailable",
-                "requires systemctl",
-            )
-        if s.http_url or s.tcp_host or s.process_pid:
-            table.add_row(
-                f"Health ({s.name})", "configured", "endpoint or PID explicitly configured"
-            )
-        if s.managed_process is not None:
-            table.add_row(
-                f"Managed ({s.name})", "configured",
-                "fixed executable; liveness checked; dry-run and policy gate apply",
-            )
-    for extra, module in [
-        ("docker", "docker"),
-        ("dashboard", "fastapi"),
-        ("embed", "sentence_transformers"),
-        ("laya", "laya"),
-    ]:
-        table.add_row(
-            extra,
-            "installed" if importlib.util.find_spec(module) else "missing",
-            "optional; not activated by the monitoring CLI",
-        )
+
     try:
         with httpx.Client(timeout=1, trust_env=False) as client:
             response = client.get("http://127.0.0.1:11434/api/tags")
             response.raise_for_status()
-        ollama = "reachable"
+        ollama_status = "reachable"
     except httpx.HTTPError:
-        ollama = "unavailable (optional)"
-    table.add_row("Ollama / D3", ollama, settings.ollama_model + "; optional local model")
-    table.add_row("Diagnosis D1/D2", "active", "local memory and deterministic runbooks")
-    cloud_ready = bool(
-        settings.cloud_enabled and settings.cloud_base_url and settings.cloud_model
-        and settings.cloud_max_calls_per_month and settings.cloud_max_spend_usd
-        and settings.cloud_estimated_max_cost_per_call_usd
-        and os.environ.get("SLIME_CLOUD_API_KEY")
-    )
-    table.add_row("D4 Cloud", "configured" if cloud_ready else "inactive",
-                  "opt-in endpoint, env key and explicit monthly reservation caps required")
-    from selfheal.diagnosis.laya_classifier import LayaClassifier
-    from selfheal.storage.store import Store
-    if settings.laya_enabled:
-        check_store = Store(":memory:")
-        laya_gate_passed = LayaClassifier(settings, check_store).evaluation() is not None
-        check_store.close()
-    else:
-        laya_gate_passed = False
-    laya_ready = bool(settings.laya_enabled and laya_gate_passed and importlib.util.find_spec("laya"))
-    table.add_row("D5 Laya", "eligible" if laya_ready else "inactive",
-                  "requires installed Router and passing held-out accuracy, calibration and latency gate")
-    table.add_row(
-        "Safety policy",
-        "active",
-        "deterministic; confidence >= " + str(settings.safety.minimum_confidence),
-    )
-    table.add_row(
-        "Action registry", f"{len(default_registry().actions)} typed actions",
-        "SAFE/APPROVAL; exact live inventory required"
-    )
-    table.add_row(
-        "Execution",
-        "dry-run (default)" if settings.dry_run else "active mutation",
-        "live execution requires explicit --no-dry-run or config change",
-    )
-    console.print(table)
+        ollama_status = "unavailable (optional)"
+
+    report = build_doctor_report(settings, probe_ollama=False)
+    for item in report["groups"]["Diagnosis"]:
+        if item["component"] == "Ollama / D3":
+            item["status"] = ollama_status
+
+    _out("Slime System Doctor")
+    _out("=" * 78)
+    for group_name in ("Collectors", "Diagnosis", "Safety", "Platform"):
+        _out(f"\n[{group_name}]")
+        for item in report["groups"][group_name]:
+            comp = str(item["component"])
+            st = str(item["status"])
+            detail = str(item["detail"])
+            if item["needs_attention"]:
+                _out(f"  [!] {comp:<22} {st:<18} {detail}", style="bold yellow")
+                if item.get("fix"):
+                    _out(f"      Fix: {item['fix']}", style="yellow")
+            else:
+                _out(f"  [OK] {comp:<21} {st:<18} {detail}")
+
+    _out(f"\n[Host Capability ({report['host_os']})]")
+    for cap in report["capabilities"]:
+        c_name = str(cap["capability"])
+        c_stat = str(cap["status"])
+        c_det = str(cap["detail"])
+        _out(f"  - {c_name}: {c_stat} ({c_det})")
+
+    _out(f"\nNext step: {report['next_step']}", style="bold" if not _use_plain_output() else None)
 
 
 @app.command()
@@ -270,12 +211,15 @@ def run(
 
 
 @app.command()
-def status(config: Path = Path("config.yaml")) -> None:
-    """Display system status, circuit breaker, kill switch, and pending actions."""
+def status(
+    config: Path = Path("config.yaml"),
+    json_output: Annotated[bool, typer.Option("--json", help="Output status in JSON format")] = False,
+) -> None:
+    """Display system health, mode banner, open incidents, active components, and safety controls."""
     try:
         settings = load_config(config)
     except (OSError, ValueError, yaml.YAMLError) as e:
-        console.print(f"[red]Error loading config:[/red] {e}")
+        _out(f"Error loading config: {e}")
         raise typer.Exit(1) from None
 
     store = Store(settings.database)
@@ -284,96 +228,268 @@ def status(config: Path = Path("config.yaml")) -> None:
         killed = state.killed()
         circuit_open = state.circuit_open()
         recent_count = state.recent_count()
-
-        table = Table(title="Safety Controls & Limits")
-        table.add_column("Property", style="bold")
-        table.add_column("Value")
-        table.add_column("Detail")
-
-        table.add_row("Kill switch", "[red]ACTIVE[/red]" if killed else "[green]INACTIVE[/green]", "Global mutation stop")
-        table.add_row(
-            "Circuit breaker",
-            "[red]OPEN[/red]" if circuit_open else "[green]CLOSED[/green]",
-            "Requires human reset if open",
+        all_incidents = store.incidents()
+        open_incidents = [
+            i for i in all_incidents if i.state not in {State.RESOLVED, State.ESCALATED}
+        ]
+        escalated_incidents = [i for i in all_incidents if i.state == State.ESCALATED]
+        pending_approvals = [
+            (d, p) for d, p in state.pending() if not state.approved(p)
+        ]
+        health_str = (
+            "HALTED"
+            if (killed or circuit_open)
+            else ("DEGRADED" if (open_incidents or escalated_incidents) else "HEALTHY")
         )
-        table.add_row("Hourly auto count", str(recent_count), f"Max: {settings.safety.max_auto_per_hour}")
-        table.add_row("Dry-run default", str(settings.dry_run), "Set in configuration")
-        console.print(table)
+        mode_info = compute_mode_summary(
+            settings, killed=killed, circuit_open=circuit_open, store=store
+        )
+        active_components = ["D1_MEMORY", "D2_RUNBOOK"]
+        if settings.metrics_enabled:
+            active_components.insert(0, "psutil_metrics")
+        if settings.services:
+            active_components.append(f"{len(settings.services)}_services")
 
-        # Pending actions
-        pending = store.connection.execute(
+        pending_actions = store.connection.execute(
             "SELECT id, incident_id, name, target, started_at, status FROM actions WHERE status IN ('reserved','executing','verifying') ORDER BY started_at"
         ).fetchall()
-        if pending:
-            p_table = Table(title="Pending / Interrupted Actions")
-            p_table.add_column("Action ID")
-            p_table.add_column("Incident ID")
-            p_table.add_column("Action")
-            p_table.add_column("Target")
-            p_table.add_column("Started At")
-            p_table.add_column("Status", style="yellow")
-            for r in pending:
-                p_table.add_row(r[0], r[1], r[2], r[3], r[4], r[5])
-            console.print(p_table)
+
+        if json_output:
+            payload = {
+                "system_health": health_str,
+                "mode": mode_info["banner_text"],
+                "mode_state": mode_info["state"],
+                "dry_run": settings.dry_run,
+                "learning_period": settings.learning_period,
+                "learning_day": mode_info["learning_day"] if settings.learning_period else None,
+                "open_incidents": len(open_incidents),
+                "escalated_incidents": len(escalated_incidents),
+                "total_incidents": len(all_incidents),
+                "pending_approvals": len(pending_approvals),
+                "active_components": active_components,
+                "kill_switch": "ACTIVE" if killed else "INACTIVE",
+                "circuit_breaker": "OPEN" if circuit_open else "CLOSED",
+                "hourly_auto_count": recent_count,
+                "max_auto_per_hour": settings.safety.max_auto_per_hour,
+                "enabled_actions": list(settings.safety.enabled_actions),
+                "pending_actions": [
+                    {
+                        "id": r[0],
+                        "incident_id": r[1],
+                        "action": r[2],
+                        "target": r[3],
+                        "started_at": r[4],
+                        "status": r[5],
+                    }
+                    for r in pending_actions
+                ],
+            }
+            typer.echo(json.dumps(payload, indent=2))
+            return
+
+        _out("Slime System Status")
+        _out("=" * 78)
+        _out(f"Mode            : {mode_info['banner_text']}")
+        _out(
+            f"System health   : {health_str} "
+            f"(open: {len(open_incidents)}, escalated: {len(escalated_incidents)}, total: {len(all_incidents)})"
+        )
+        if settings.learning_period:
+            _out(f"Learning period : Observing: day {mode_info['learning_day']} of 7 (baseline building)")
+        _out(f"Pending review  : {len(pending_approvals)} approval(s) queued")
+        _out(f"Active pipeline : {', '.join(active_components)}")
+        _out(f"Kill switch     : {'ACTIVE (all mutations halted)' if killed else 'INACTIVE'}")
+        _out(f"Circuit breaker : {'OPEN (requires reconcile + reset-circuit)' if circuit_open else 'CLOSED'}")
+        _out(f"Hourly budget   : {recent_count} / {settings.safety.max_auto_per_hour} automatic reservations used")
+        _out(
+            f"Enabled actions : {', '.join(settings.safety.enabled_actions) if settings.safety.enabled_actions else 'none (default)'}"
+        )
+        if pending_actions:
+            _out("\nPending / Interrupted Actions (require `selfheal reconcile <action_id>`):")
+            for r in pending_actions:
+                _out(f"  - {r[0]} | incident={r[1]} | {r[2]} on {r[3]} | status={r[5]}")
     finally:
         store.close()
 
 
+def _truncate_cell(value: str, width: int) -> str:
+    """Fit a value into fixed width without multi-line wrapping."""
+    clean_val = " ".join(value.split())
+    if len(clean_val) <= width:
+        return f"{clean_val:<{width}}"
+    if width <= 1:
+        return clean_val[:width]
+    return f"{clean_val[: width - 1]}~"
+
+
 @app.command()
 def incidents(
+    incident_id: Annotated[str | None, typer.Argument(help="Optional incident ID or prefix for detail view")] = None,
     config: Path = Path("config.yaml"),
     limit: Annotated[int, typer.Option("--limit", help="Max incidents to list")] = 10,
     show_postmortem: Annotated[str | None, typer.Option("--postmortem", help="Incident ID to display postmortem for")] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Output incidents in JSON format")] = False,
 ) -> None:
-    """List recent incidents or view postmortem for a specific incident."""
+    """List incidents in an 80-column one-line format, or inspect a single incident in detail."""
     try:
         settings = load_config(config)
     except (OSError, ValueError, yaml.YAMLError) as e:
-        console.print(f"[red]Error loading config:[/red] {e}")
+        _out(f"Error loading config: {e}")
         raise typer.Exit(1) from None
 
     store = Store(settings.database)
+    safety_state = SafetyState(store)
+    registry = default_registry()
     try:
         if show_postmortem:
             pm = store.postmortem(show_postmortem)
             if not pm:
-                console.print(f"No postmortem found for incident {show_postmortem}.")
+                _out(f"No postmortem found for incident {show_postmortem}.")
             else:
-                console.print(pm["markdown"])
+                _out(str(pm["markdown"]))
             return
 
         all_incidents = store.incidents()
         if not all_incidents:
-            console.print("No incidents recorded.")
+            if json_output:
+                typer.echo(json.dumps({"incidents": []}, indent=2))
+            else:
+                _out("No incidents recorded. Run `selfheal run` to observe services in dry-run.")
             return
 
-        table = Table(title=f"Recent Incidents (Total: {len(all_incidents)})")
-        table.add_column("ID", style="bold")
-        table.add_column("State")
-        table.add_column("Opened At (UTC)")
-        table.add_column("Services")
-        table.add_column("Root Candidates")
-        table.add_column("Flaps")
+        # Detail view when incident_id (full or prefix) is supplied
+        if incident_id is not None:
+            matched = [
+                inc for inc in all_incidents if inc.id == incident_id or inc.id.startswith(incident_id)
+            ]
+            if not matched:
+                _out(f"Incident '{incident_id}' not found.")
+                raise typer.Exit(1)
+            inc = matched[-1]
+            hyps = sorted(
+                store.hypotheses(inc.id),
+                key=lambda h: float(h.get("confidence", 0.0)),  # type: ignore[arg-type]
+                reverse=True,
+            )
+            top_h: dict[str, Any] | None = hyps[0] if hyps else None
+            evs = store.incident_events(inc.id)
+            pm = store.postmortem(inc.id)
+            result_note, dry_note, fix_text = format_incident_execution_note(
+                inc, top_h, settings, store, registry
+            )
+            policy_check = evaluate_ordered_policy_gates(
+                inc, top_h, settings, safety_state, registry, None
+            )
+
+            if json_output:
+                detail_payload = {
+                    "id": inc.id,
+                    "state": inc.state.value,
+                    "opened_at": inc.opened_at.isoformat(),
+                    "services": inc.services,
+                    "root_candidates": inc.root_candidates,
+                    "downstream": inc.downstream,
+                    "flap_count": inc.flap_count,
+                    "proposed_fix": fix_text,
+                    "result": result_note,
+                    "dry_run_note": dry_note,
+                    "hypotheses": hyps,
+                    "events": [e.model_dump(mode="json") for e in evs],
+                    "policy_check": policy_check,
+                    "postmortem": pm,
+                }
+                typer.echo(json.dumps(detail_payload, indent=2))
+                return
+
+            _out(f"Incident Detail: {inc.id}")
+            _out("=" * 78)
+            _out(f"State           : {inc.state.value}")
+            _out(f"Opened at       : {inc.opened_at.isoformat()}")
+            _out(f"Services        : {', '.join(inc.services)}")
+            _out(f"Root candidates : {', '.join(inc.root_candidates)}")
+            _out(f"Downstream      : {', '.join(inc.downstream) if inc.downstream else 'none'}")
+            _out(f"Flap count      : {inc.flap_count}")
+            _out(f"Proposed action : {fix_text}")
+            _out(f"Outcome / Note  : {result_note}")
+            _out("\nHypotheses:")
+            if not hyps:
+                _out("  (none)")
+            for idx, h in enumerate(hyps, start=1):
+                _out(
+                    f"  {idx}. [{h['tier']}] conf={float(h['confidence']):.2f} | "  # type: ignore[arg-type]
+                    f"{h['root_cause']} -> {h.get('action_name') or 'suggest-only'}"
+                )
+            _out("\nPolicy Check (in gate order):")
+            for gate in policy_check["gates"]:
+                tag = (
+                    "PASS"
+                    if gate["status"] == "passed"
+                    else ("STOP" if gate["status"] == "failed" else "----")
+                )
+                _out(f"  [{tag}] {gate['order']:>2}. {gate['name']}: {gate['detail']}")
+            _out("\nTimeline Events:")
+            for ev in evs:
+                _out(f"  - {ev.timestamp.isoformat()} [{ev.service}/{ev.kind.value}] {ev.evidence}")
+            if pm:
+                _out(f"\nPostmortem: available (`selfheal incidents --postmortem {inc.id}`)")
+            return
+
+        # List view: strictly <= 80 columns, one line per incident, zero multi-line cell wrapping
+        rows_json = []
+        header = (
+            f"{'ID':<8} {'STATE':<9} {'SERVICES':<8} "
+            f"{'ROOT CAUSE':<10} {'ACTION':<13} {'RESULT'}"
+        )
+        lines = [header, "-" * 78]
 
         for inc in all_incidents[-limit:]:
-            state_color = {
-                State.OPEN: "yellow",
-                State.INVESTIGATING: "blue",
-                State.MITIGATING: "magenta",
-                State.VERIFYING: "cyan",
-                State.RESOLVED: "green",
-                State.ESCALATED: "red",
-            }.get(inc.state, "white")
-
-            table.add_row(
-                inc.id,
-                f"[{state_color}]{inc.state.value}[/{state_color}]",
-                inc.opened_at.strftime("%Y-%m-%d %H:%M:%S"),
-                ", ".join(inc.services),
-                ", ".join(inc.root_candidates),
-                str(inc.flap_count),
+            hyps = store.hypotheses(inc.id)
+            top_h = (
+                max(hyps, key=lambda h: float(h.get("confidence", 0.0)))  # type: ignore[arg-type]
+                if hyps
+                else None
             )
-        console.print(table)
+            result_note, dry_note, fix_text = format_incident_execution_note(
+                inc, top_h, settings, store, registry
+            )
+            root_cause_str = (
+                str(top_h["root_cause"])
+                if top_h
+                else (",".join(inc.root_candidates) or "unknown")
+            )
+            act_short = (
+                str(top_h["action_name"])
+                if (top_h and top_h.get("action_name"))
+                else "suggest-only"
+            )
+            rows_json.append({
+                "id": inc.id,
+                "id_prefix": inc.id[:8],
+                "state": inc.state.value,
+                "services": inc.services,
+                "root_cause": root_cause_str,
+                "action": act_short,
+                "proposed_fix": fix_text,
+                "result": result_note,
+                "dry_run_note": dry_note,
+            })
+            list_result = result_note.removeprefix(f"{act_short}: ")
+            line = (
+                f"{_truncate_cell(inc.id[:8], 8)} "
+                f"{_truncate_cell(inc.state.value, 9)} "
+                f"{_truncate_cell(','.join(inc.services), 8)} "
+                f"{_truncate_cell(root_cause_str, 10)} "
+                f"{_truncate_cell(act_short, 13)} "
+                f"{list_result[:26]}"
+            )
+            lines.append(line)
+
+        if json_output:
+            typer.echo(json.dumps({"incidents": rows_json}, indent=2))
+            return
+
+        for ln in lines:
+            _out(ln)
     finally:
         store.close()
 
@@ -381,9 +497,9 @@ def incidents(
 @app.command()
 def approve(
     incident_id: str,
-    action: str,
-    target: str,
-    revision: str,
+    action: Annotated[str | None, typer.Argument(help="Action name (optional if staged)")] = None,
+    target: Annotated[str | None, typer.Argument(help="Target alias (optional if staged)")] = None,
+    revision: Annotated[str | None, typer.Argument(help="Revision (optional if staged)")] = None,
     config: Path = Path("config.yaml"),
     actor: Annotated[str | None, typer.Option("--actor", help="Operator username/identity")] = None,
     lifetime: Annotated[int, typer.Option("--lifetime", help="Approval validity in seconds")] = 300,
@@ -400,29 +516,89 @@ def approve(
     store = Store(settings.database)
     state = SafetyState(store)
     try:
-        prop = Proposal(
-            incident_id=incident_id,
-            name=action,
-            params={"target": target},
-            expected_revision=revision,
-            confidence=confidence,
-        )
+        prop: Proposal | None = None
+        if action is None or target is None or revision is None:
+            # Resolve from staged pending approvals by exact digest first
+            prop = state.pending_by_digest(incident_id)
+            if prop is None:
+                all_pending = state.pending()
+                matching = [
+                    (digest_val, candidate)
+                    for digest_val, candidate in all_pending
+                    if candidate.incident_id == incident_id
+                ]
+                if len(matching) > 1 or (len(matching) == 1 and len(all_pending) > 1):
+                    to_list = matching if len(matching) > 1 else all_pending
+                    console.print(
+                        "[red]Multiple proposals are staged; refusing ambiguous approval by incident ID. "
+                        "Run `selfheal approve <digest>` with the exact digest:[/red]"
+                    )
+                    for digest_val, candidate in to_list:
+                        console.print(
+                            f"  digest={digest_val} incident={candidate.incident_id} "
+                            f"action={candidate.name} target={candidate.params.get('target')} "
+                            f"revision={candidate.expected_revision}",
+                            markup=False,
+                        )
+                    raise typer.Exit(1)
+                if len(matching) == 1:
+                    prop = matching[0][1]
+            if prop is None:
+                console.print(
+                    f"[red]No staged pending approval found for '{incident_id}'. "
+                    "Supply <incident_id> <action> <target> <revision> explicitly.[/red]"
+                )
+                raise typer.Exit(1)
+        else:
+            prop = Proposal(
+                incident_id=incident_id,
+                name=action,
+                params={"target": target},
+                expected_revision=revision,
+                confidence=confidence,
+            )
         digest = proposal_digest(prop)
         state.approve(prop, trusted_actor, lifetime_seconds=lifetime)
         console.print(f"[green]Approval granted by '{trusted_actor}'[/green]")
         console.print(f"Proposal Digest: [cyan]{digest}[/cyan]")
-        console.print(f"Action: {action} on {target} (Revision: {revision})")
+        console.print(
+            f"Action: {prop.name} on {prop.params.get('target')} (Revision: {prop.expected_revision})"
+        )
         console.print(f"Valid for {lifetime} seconds.")
     finally:
         store.close()
 
 
-@app.command(name="dry-run")
-def set_dry_run(
-    enabled: Annotated[bool, typer.Argument(help="Enable (true) or disable (false) dry-run in config.yaml")],
+@app.command(name="enable-action")
+def enable_action(
+    actions: Annotated[list[str], typer.Argument(help="Action names to allow for auto-execution")],
     config: Path = Path("config.yaml"),
 ) -> None:
-    """View or update dry-run configuration safely."""
+    """Enable real auto-execution only for specific SAFE actions in config.yaml."""
+    if not config.exists():
+        console.print(f"Configuration file {config} not found.")
+        raise typer.Exit(1)
+    reg = default_registry()
+    for act in actions:
+        try:
+            reg.get(act)
+        except LookupError:
+            console.print(f"Unknown action: {act}", markup=False)
+            raise typer.Exit(1) from None
+    data = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+    safety_block = dict(data.get("safety") or {})
+    safety_block["enabled_actions"] = list(dict.fromkeys(actions))
+    data["safety"] = safety_block
+    config.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    console.print(f"Enabled actions in {config.name}: {', '.join(safety_block['enabled_actions'])}")
+
+
+@app.command(name="dry-run")
+def set_dry_run(
+    enabled: Annotated[bool, typer.Argument(help="Enable (true/on) or disable (false/off) dry-run; defaults to true")] = True,
+    config: Path = Path("config.yaml"),
+) -> None:
+    """Return to observe-only (dry-run) or update dry-run configuration safely."""
     if not config.exists():
         console.print(f"Configuration file {config} not found.")
         raise typer.Exit(1)
@@ -435,11 +611,11 @@ def set_dry_run(
 
 @app.command(name="kill-switch")
 def kill_switch(
-    enable: Annotated[bool, typer.Argument(help="True to engage kill switch, False to disengage")],
+    enable: Annotated[bool, typer.Argument(help="on/true to engage kill switch, off/false to disengage")],
     config: Path = Path("config.yaml"),
     actor: Annotated[str | None, typer.Option("--actor", help="Operator username/identity")] = None,
 ) -> None:
-    """Engage or disengage the global mutation kill switch."""
+    """Engage or disengage the global mutation kill switch (`selfheal kill-switch on|off`)."""
     try:
         settings = load_config(config)
     except (OSError, ValueError, yaml.YAMLError) as e:
@@ -576,7 +752,7 @@ def bench(
     json_output: Annotated[bool, typer.Option("--json", help="Output results in JSON format")] = False,
     output: Annotated[Path | None, typer.Option("--output", help="Optional file path to export JSON results")] = None,
 ) -> None:
-    """Run reproducible benchmarks across enabled tiers and report detection, repair, and safety metrics."""
+    """Run the 7-case smoke test (or adapter suite) across enabled tiers and report detection, repair, false-incident, and safety metrics."""
     try:
         settings = load_config(config) if config.exists() else Config(database=":memory:")
     except (OSError, ValueError, yaml.YAMLError) as e:
@@ -606,37 +782,40 @@ def bench(
 
     if output:
         output.write_text(report.model_dump_json(indent=2), encoding="utf-8")
-        console.print(f"[green]Benchmark report exported to {output}[/green]")
+        console.print(f"[green]Smoke test report exported to {output}[/green]")
 
     if json_output:
         console.print(report.model_dump_json(indent=2))
         return
 
-    console.print(f"\n[bold]Dataset:[/bold] {report.dataset_name} ({report.dataset_license})")
+    console.print(f"\n[bold]Dataset:[/bold] {report.dataset_name} ({report.dataset_license}) — 7-Case Smoke Test")
     for note in report.adapter_notes:
         console.print(f"[dim]{note}[/dim]")
 
-    table = Table(title="\nBenchmark Evaluation by Tier")
+    table = Table(title="\n7-Case Smoke Test by Tier")
     table.add_column("Tier", style="bold", no_wrap=True)
-    table.add_column("Total", justify="right")
-    table.add_column("Detect", justify="right")
-    table.add_column("Diag", justify="right")
-    table.add_column("Fix", justify="right")
-    table.add_column("Verified", justify="right")
-    table.add_column("FP", justify="right")
-    table.add_column("Unsafe", justify="right")
-    table.add_column("ms", justify="right")
+    table.add_column("Cases", justify="right", no_wrap=True)
+    table.add_column("Detect", justify="right", no_wrap=True)
+    table.add_column("DiagMatch", justify="right", no_wrap=True)
+    table.add_column("Fix", justify="right", no_wrap=True)
+    table.add_column("FalseInc", justify="right", no_wrap=True)
+    table.add_column("Unsafe", justify="right", no_wrap=True)
+    table.add_column("ms", justify="right", no_wrap=True)
 
     for tier_name, m in report.tiers.items():
         unsafe_styled = f"[green]{m.unsafe_attempt_rate:.1%}[/green]" if m.unsafe_attempts == 0 else f"[red]{m.unsafe_attempt_rate:.1%}[/red]"
+        false_inc_text = (
+            f"{m.false_incidents}/{m.non_incident_scenarios}"
+            if m.non_incident_scenarios
+            else "0/0"
+        )
         table.add_row(
             tier_name,
-            str(m.total_scenarios),
+            f"{m.total_scenarios}",
             f"{m.detection_rate:.1%}",
-            f"{m.diagnosis_accuracy:.1%}",
+            f"{m.diagnosis_match_rate:.1%}",
             f"{m.correct_fix_rate:.1%}" if m.total_scenarios else "N/A",
-            "N/A",
-            f"{m.false_positive_rate:.1%}",
+            false_inc_text,
             unsafe_styled,
             f"{m.mean_latency_ms:.1f}",
         )
@@ -673,25 +852,32 @@ def dashboard(
     config: Path = Path("config.yaml"),
     host: Annotated[str, typer.Option("--host", help="Binding host (strictly localhost-only)")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", help="Port to listen on")] = 8080,
+    demo: Annotated[bool, typer.Option("--demo", help="Seed a demo database from the chaos harness and serve read-only")] = False,
 ) -> None:
     """Launch the optional one-page localhost-only FastAPI dashboard."""
-    try:
-        settings = load_config(config)
-    except (OSError, ValueError, yaml.YAMLError) as e:
-        console.print(f"[red]Error loading config:[/red] {e}")
-        raise typer.Exit(1) from None
-
     if host not in ("127.0.0.1", "localhost"):
         console.print(
             f"[red]Security error:[/red] Host '{host}' is forbidden. Dashboard is strictly localhost-only (127.0.0.1)."
         )
         raise typer.Exit(1)
 
+    if demo:
+        settings = Config(database=":memory:")
+    else:
+        try:
+            settings = load_config(config)
+        except (OSError, ValueError, yaml.YAMLError) as e:
+            console.print(f"[red]Error loading config:[/red] {e}")
+            raise typer.Exit(1) from None
+
     try:
         from selfheal.interface.dashboard import run_dashboard
 
-        console.print(f"[green]Starting Slime Dashboard on http://{host}:{port}...[/green]")
-        run_dashboard(settings, host=host, port=port)
+        mode_label = " (READ-ONLY DEMO)" if demo else ""
+        console.print(
+            f"[green]Starting Slime Dashboard{mode_label} on http://{host}:{port}...[/green]"
+        )
+        run_dashboard(settings, host=host, port=port, demo=demo, config_path=None if demo else config)
     except ImportError as e:
         console.print(f"[yellow]Dashboard optional dependencies not installed:[/yellow] {e}")
         console.print("Install with: [bold]pip install -e '.[dashboard]'[/bold]")
@@ -699,5 +885,3 @@ def dashboard(
     except Exception as e:  # noqa: BLE001
         console.print(f"[red]Dashboard failed to start:[/red] {e}")
         raise typer.Exit(1) from None
-
-

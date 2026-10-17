@@ -11,18 +11,28 @@ inventory configuration and local database ownership are trusted.
 
 The executor accepts registered action names and strict parameter schemas only,
 never shell commands. Parameters select exact inventory aliases. Authorization
-checks live identity/revision, trusted diagnosis status, confidence, critical
-targets, blast radius, dry-run, kill switch, cooldown, hourly budget and the
-human-reset circuit breaker. Refusals and authorizations are audited; unavailable
-audit/state storage fails closed. Live state is rechecked before dispatch.
+evaluates the kill switch first, then proposal/incident identity, registered action
+and forbidden-action rules, parameter schemas, trusted diagnosis status, budget and
+flapping checks, minimum confidence, the human-reset circuit breaker, live
+inventory identity/revision, critical-target and per-action (`enabled_actions`)
+human approvals, blast radius, dry-run, cooldown, hourly budget, and live action
+preconditions. Refusals and authorizations are audited; unavailable audit/state
+storage fails closed. Live state is rechecked before dispatch.
 
-Approved defaults: confidence 0.90, one automatic target, five automatic attempts
-per hour, 300-second cooldown, breaker after three consecutive failed fixes, and
-120-second sampled health stability. Failed attempts consume the budget. Exact,
-expiring, single-use approvals cover critical targets and APPROVAL actions.
-Approvals do not bypass invalid output, confidence, kill, dry-run or breaker rules.
-Human control APIs are a trusted local boundary, not an authentication service.
+Approved defaults: `enabled_actions: []` (no action auto-executes until explicitly
+enabled via `selfheal enable-action`), confidence 0.90, one automatic target, five
+automatic attempts per hour, 300-second cooldown, breaker after three consecutive
+failed fixes, and 120-second sampled health stability. Failed attempts consume the
+budget. Exact, expiring, single-use approvals cover critical targets, non-enabled
+actions, and APPROVAL actions. When more than one proposal is staged, `selfheal approve <incident_id>`
+refuses and lists all staged proposals with their SHA-256 digests, requiring
+`selfheal approve <digest>`. Approvals do not bypass kill switch, invalid output,
+confidence, dry-run or breaker rules. Human control APIs are a trusted local
+boundary, not an authentication service.
 
+The closed remediation registry contains 8 mutation actions (`restart_container`,
+`restart_managed_process`, `clear_tmp_files`, `rotate_logs`, `restart_service`,
+`kill_runaway_process`, `reload_nginx`, `rollback_to_previous_image`).
 SAFE container restart requires a crashed target and actual health verification.
 SAFE managed-process restart is limited to a service with an operator-configured
 absolute executable, working directory and fixed argument list. Slime starts
@@ -39,10 +49,11 @@ rollback after spawn, so a failed verification escalates and the owned child
 may remain running. An operator with write access to the configured executable
 or directory could race path validation and launch; protect these paths with OS
 permissions. SQLite ownership records also rely on protected local DB access.
-Service restart/reload, process termination and exact dangling-image removal
-require approval. Image rollback is refused by the native backend until a trusted
-deployment-specific adapter can preserve its deployment configuration. No broad
-Docker prune, arbitrary deletion, DB mutation, firewall or package action exists.
+Service restart/reload and process termination require approval. Image rollback
+is refused by the native backend until a trusted deployment-specific adapter can
+preserve its deployment configuration. `free_docker_space` has been removed from
+the action registry; no Docker prune/image-removal, arbitrary deletion, DB
+mutation, firewall or package action exists.
 
 File mutations are disabled unless exact private POSIX files are explicitly
 attested quiescent and free of secrets. Cleanup quarantines one file and retains
@@ -61,7 +72,12 @@ health between probes. UTC rate-limit/approval timestamps trust the host clock.
 
 ## Diagnostic and injection boundaries
 
-Diagnostics have a separate immutable registry and no action dispatch capability.
+Diagnostics have a separate immutable registry of 10 read-only tools (`tail_logs`,
+`get_container_status`, `check_port`, `disk_usage`, `top_processes`,
+`recent_changes`, `diff_config`, `http_probe`, `dns_check`, and
+`rerun_healthcheck`) and no action dispatch capability. Because `rerun_healthcheck`
+is a read-only diagnostic tool rather than a remediation action, it consumes no
+cooldown or hourly mutation budget.
 Only configured services, PIDs, exact files and endpoints are accessible. Path
 validation rejects traversal, symlinks and Windows reparse points; POSIX reads
 walk pinned directory descriptors with no-follow, and Windows validates the

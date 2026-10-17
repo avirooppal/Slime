@@ -107,7 +107,7 @@ class ToolResult(StrictModel):
 
 
 def tool_registry() -> MappingProxyType[str, ToolDefinition]:
-    """Exactly the nine read-only tools; no action names share this dispatch table."""
+    """Exactly the ten read-only tools; no action names share this dispatch table."""
     definitions: list[tuple[str, type[StrictModel]]] = [
         ("tail_logs", TailParams),
         ("get_container_status", ContainerParams),
@@ -118,6 +118,7 @@ def tool_registry() -> MappingProxyType[str, ToolDefinition]:
         ("diff_config", DiffParams),
         ("http_probe", HTTPParams),
         ("dns_check", DNSParams),
+        ("rerun_healthcheck", ServiceParams),
     ]
     return MappingProxyType({name: ToolDefinition(name, schema) for name, schema in definitions})
 

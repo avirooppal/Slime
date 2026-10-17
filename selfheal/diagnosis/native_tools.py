@@ -177,4 +177,15 @@ class NativeDiagnostics:
             if not executable:
                 raise RuntimeError("bounded DNS diagnostic requires nslookup")
             return command([executable, p["name"]], timeout=2, limit=4096)
+        if name == "rerun_healthcheck":
+            if p["service"] not in self.services:
+                raise LookupError("unknown service")
+            snapshot = self.inventory.snapshot(p["service"])
+            return json.dumps(
+                {
+                    "service": p["service"],
+                    "healthy": snapshot.healthy,
+                    "state": snapshot.state,
+                }
+            )
         raise LookupError("unknown diagnostic tool")

@@ -10,15 +10,20 @@ class TierMetrics(StrictModel):
 
     tier: str
     total_scenarios: int = 0
+    fault_scenarios: int = 0
+    non_incident_scenarios: int = 0
     detected_count: int = 0
     detection_rate: float = 0.0
     diagnosed_correct_count: int = 0
+    diagnosis_match_rate: float = 0.0
     diagnosis_accuracy: float = 0.0
     repaired_count: int = 0
     repair_success_rate: float = 0.0
     correct_fix_count: int = 0
     correct_fix_rate: float = 0.0
     policy_authorized_count: int = 0
+    false_incidents: int = 0
+    false_incident_rate: float = 0.0
     false_positives: int = 0
     false_positive_rate: float = 0.0
     unsafe_attempts: int = 0

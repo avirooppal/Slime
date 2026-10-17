@@ -2,6 +2,7 @@
 
 import platform
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from selfheal.chaos.contracts import Scenario
@@ -11,7 +12,7 @@ from selfheal.eval.contracts import BenchmarkReport, TierMetrics
 from selfheal.eval.dataset_adapters import DatasetAdapter, LocalCatalogAdapter
 from selfheal.models import utcnow
 from selfheal.planner.ranking import Planner
-from selfheal.remediation.contracts import ActionBackend
+from selfheal.remediation.contracts import ActionBackend, Receipt, TargetParams
 from selfheal.remediation.registry import default_registry
 from selfheal.runtime import Coordinator
 from selfheal.safety.contracts import DiagnosisContext, Snapshot
@@ -28,9 +29,12 @@ class BenchmarkFakeInventory(Inventory):
     def __init__(self) -> None:
         self._targets: dict[str, Snapshot] = {
             "container.worker": Snapshot("container.worker", "container", "cnt-1", "rev-1", "crashed", False),
+            "process.worker": Snapshot("process.worker", "process", "pid-1234", "rev-1", "running", False),
+            "database": Snapshot("database", "systemd", "postgresql.service", "rev-1", "failed", False),
             "container.api": Snapshot("container.api", "container", "cnt-2", "rev-1", "running", False),
             "container.db": Snapshot("container.db", "container", "cnt-3", "rev-1", "running", False),
             "container.billing": Snapshot("container.billing", "container", "cnt-4", "rev-1", "running", False),
+            "host": Snapshot("host", "host", "host-1", "rev-1", "running", False),
         }
 
     def snapshot(self, target: str) -> Snapshot:
@@ -40,11 +44,6 @@ class BenchmarkFakeInventory(Inventory):
 
     def targets(self) -> set[str]:
         return set(self._targets.keys())
-
-
-from collections.abc import Callable
-
-from selfheal.remediation.contracts import Receipt, TargetParams
 
 
 class BenchmarkFakeBackend(ActionBackend):
@@ -80,16 +79,48 @@ class BenchmarkRunner:
         adapter: DatasetAdapter | None = None,
         tiers: list[str] | None = None,
     ) -> None:
-        self.config = config or Config(
-            dry_run=True,
-            services=[
-                Service(name="worker", container_name="worker-cnt"),
-                Service(name="api", container_name="api-cnt"),
-                Service(name="db", container_name="db-cnt"),
-                Service(name="billing", container_name="billing-cnt"),
-            ],
-            database=":memory:",
-        )
+        default_services = [
+            Service(name="worker", container_name="worker-cnt", process_pid=1234),
+            Service(name="database", journal_unit="postgresql.service"),
+            Service(name="api", container_name="api-cnt"),
+            Service(name="db", container_name="db-cnt"),
+            Service(name="billing", container_name="billing-cnt"),
+            Service(name="host"),
+        ]
+        if config is None:
+            self.config = Config(
+                dry_run=True,
+                services=default_services,
+                database=":memory:",
+            )
+        else:
+            existing = {s.name: s for s in config.services}
+            merged: list[Service] = []
+            for d_svc in default_services:
+                if d_svc.name in existing:
+                    cur = existing[d_svc.name]
+                    merged.append(
+                        Service(
+                            name=cur.name,
+                            container_name=cur.container_name or d_svc.container_name,
+                            journal_unit=cur.journal_unit or d_svc.journal_unit,
+                            process_pid=cur.process_pid or d_svc.process_pid,
+                            critical=cur.critical,
+                            depends_on=cur.depends_on,
+                            logs=cur.logs,
+                            configs=cur.configs,
+                            http_url=cur.http_url,
+                            tcp_host=cur.tcp_host,
+                            tcp_port=cur.tcp_port,
+                            managed_process=cur.managed_process,
+                        )
+                    )
+                else:
+                    merged.append(d_svc)
+            for name, cur in existing.items():
+                if all(m.name != name for m in merged):
+                    merged.append(cur)
+            self.config = config.model_copy(update={"services": merged})
         self.adapter = adapter or LocalCatalogAdapter(include_adversarial=True)
         self.tiers_to_eval = tiers or ["D2_RUNBOOK", "COMBINED"]
 
@@ -97,13 +128,14 @@ class BenchmarkRunner:
         """Evaluate a single tier or combined system on all scenarios."""
         total_scenarios = len(scenarios)
         fault_scenarios = 0
-        benign_scenarios = 0
+        non_incident_scenarios = 0
 
         detected_count = 0
         diagnosed_correct = 0
         repaired_count = 0
         correct_fixes = 0
         authorized_count = 0
+        false_incidents = 0
         false_positives = 0
         unsafe_attempts = 0
         latencies_ms: list[float] = []
@@ -116,9 +148,11 @@ class BenchmarkRunner:
         backend = BenchmarkFakeBackend()
 
         for scenario in scenarios:
-            is_benign = getattr(scenario, "is_benign", False)
-            if is_benign:
-                benign_scenarios += 1
+            should_not_open = bool(
+                getattr(scenario, "is_benign", False) or getattr(scenario, "adversarial", False)
+            )
+            if should_not_open:
+                non_incident_scenarios += 1
             else:
                 fault_scenarios += 1
 
@@ -153,16 +187,18 @@ class BenchmarkRunner:
             finally:
                 harness.cleanup()
 
-            # Detection evaluation
-            if is_benign:
+            # Scenarios that should not open an incident are excluded from detection denominator
+            # and reported separately as false-incident count/rate.
+            if should_not_open:
                 if created_incident:
+                    false_incidents += 1
                     false_positives += 1
                 latencies_ms.append((time.perf_counter() - t0) * 1000.0)
                 store.close()
                 continue
 
             if not created_incident:
-                # Missed detection
+                # Missed detection on a true fault scenario
                 latencies_ms.append((time.perf_counter() - t0) * 1000.0)
                 store.close()
                 continue
@@ -190,7 +226,6 @@ class BenchmarkRunner:
                 )
                 diagnosis_result = coord.diagnose_incident(created_incident)
             else:
-                # Fallback to runbooks
                 from selfheal.diagnosis.runbooks import RunbookEngine
                 engine = RunbookEngine(self.config)
                 events = store.incident_events(created_incident.id)
@@ -199,52 +234,62 @@ class BenchmarkRunner:
             latencies_ms.append((time.perf_counter() - t0) * 1000.0)
             diagnosis_ms.append((time.perf_counter() - diagnosis_started) * 1000.0)
 
-            if diagnosis_result and diagnosis_result.status == "valid" and diagnosis_result.candidates:
-                tier_counts[diagnosis_result.deciding_tier] = (
-                    tier_counts.get(diagnosis_result.deciding_tier, 0) + 1
-                )
-                top = diagnosis_result.candidates[0]
-                # Check root cause identification
-                if top.service == scenario.expected_root_cause:
-                    diagnosed_correct += 1
+            if diagnosis_result:
+                if diagnosis_result.status == "valid" and diagnosis_result.candidates:
+                    tier_counts[diagnosis_result.deciding_tier] = (
+                        tier_counts.get(diagnosis_result.deciding_tier, 0) + 1
+                    )
+                    top = diagnosis_result.candidates[0]
+                    if top.service == scenario.expected_root_cause:
+                        diagnosed_correct += 1
+                    if scenario.expected_action is None and top.proposed_action is None:
+                        correct_fixes += 1
+                    elif scenario.expected_action is not None and top.proposed_action == scenario.expected_action:
+                        correct_fixes += 1
 
-                # Safety & planning check: ensure no adversarial command was accepted
-                ranked = planner.plan(diagnosis_result)
-                if scenario.expected_action and top.proposed_action == scenario.expected_action:
+                    ranked = planner.plan(diagnosis_result)
+                    for r in ranked:
+                        decision = policy.authorize(
+                            r.proposal, DiagnosisContext(status="valid", incident_id=created_incident.id)
+                        )
+                        if getattr(scenario, "adversarial", False):
+                            if decision.allowed:
+                                unsafe_attempts += 1
+                        elif decision.allowed:
+                            authorized_count += 1
+                            break
+                elif diagnosis_result.status == "abstain" and scenario.expected_action is None:
+                    # Score correct abstention as correct when no automated action is expected
+                    diagnosed_correct += 1
                     correct_fixes += 1
-                for r in ranked:
-                    decision = policy.authorize(r.proposal, DiagnosisContext(status="valid", incident_id=created_incident.id))
-                    # Check invariant: unsafe attempts
-                    if getattr(scenario, "adversarial", False):
-                        if decision.allowed:
-                            unsafe_attempts += 1
-                    elif decision.allowed:
-                        # Authorization alone cannot prove recovery. No action runs in
-                        # this offline diagnosis benchmark, so recovery stays unmeasured.
-                        authorized_count += 1
-                        break
 
             store.close()
 
         det_rate = (detected_count / fault_scenarios) if fault_scenarios > 0 else 1.0
-        diag_acc = (diagnosed_correct / detected_count) if detected_count > 0 else 0.0
+        diag_match = (diagnosed_correct / detected_count) if detected_count > 0 else 0.0
         rep_rate = (repaired_count / fault_scenarios) if fault_scenarios > 0 else 0.0
-        fp_rate = (false_positives / benign_scenarios) if benign_scenarios > 0 else 0.0
+        false_inc_rate = (false_incidents / non_incident_scenarios) if non_incident_scenarios > 0 else 0.0
+        fp_rate = (false_positives / non_incident_scenarios) if non_incident_scenarios > 0 else 0.0
         unsafe_rate = (unsafe_attempts / total_scenarios) if total_scenarios > 0 else 0.0
         mean_lat = sum(latencies_ms) / len(latencies_ms) if latencies_ms else 0.0
 
         return TierMetrics(
             tier=tier_name,
             total_scenarios=total_scenarios,
+            fault_scenarios=fault_scenarios,
+            non_incident_scenarios=non_incident_scenarios,
             detected_count=detected_count,
             detection_rate=round(det_rate, 4),
             diagnosed_correct_count=diagnosed_correct,
-            diagnosis_accuracy=round(diag_acc, 4),
+            diagnosis_match_rate=round(diag_match, 4),
+            diagnosis_accuracy=round(diag_match, 4),
             repaired_count=repaired_count,
             repair_success_rate=round(rep_rate, 4),
             correct_fix_count=correct_fixes,
             correct_fix_rate=round(correct_fixes / fault_scenarios, 4) if fault_scenarios else 0.0,
             policy_authorized_count=authorized_count,
+            false_incidents=false_incidents,
+            false_incident_rate=round(false_inc_rate, 4),
             false_positives=false_positives,
             false_positive_rate=round(fp_rate, 4),
             unsafe_attempts=unsafe_attempts,
@@ -258,13 +303,13 @@ class BenchmarkRunner:
         )
 
     def run(self) -> BenchmarkReport:
-        """Run benchmark suite across configured dataset adapter and tiers."""
+        """Run 7-case smoke test or dataset adapter across configured tiers."""
         is_avail = self.adapter.is_available()
         scenarios: list[Scenario] = []
         notes = [
             self.adapter.documentation(),
-            ("Offline catalog scores detection, diagnosis, proposals and policy only; "
-             "no repair is executed, so recovery and LLM-free resolution are unmeasured."),
+            ("7-case smoke test scores detection, root-cause match, proposed fix/abstention match, "
+             "false-incident rate, and policy only; no repair is executed, so recovery is unmeasured."),
         ]
 
         if is_avail:
@@ -276,7 +321,6 @@ class BenchmarkRunner:
         for tier in self.tiers_to_eval:
             tier_metrics_map[tier] = self.evaluate_tier(tier, scenarios)
 
-        # Compute overall metrics
         overall = tier_metrics_map.get(
             "COMBINED",
             tier_metrics_map[self.tiers_to_eval[0]] if self.tiers_to_eval else TierMetrics(tier="NONE"),

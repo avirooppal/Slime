@@ -108,10 +108,15 @@ class RunbookEngine:
         crashed_svc: str | None = None
 
         for e in events:
+            if e.source == "process":
+                continue
             # Check for container failure signals
             text = (e.evidence or "") + " " + str(e.attributes.get("reason", ""))
             text_lower = text.lower()
-            if any(term in text_lower for term in ["oomkilled", "exitcode", "container exited", "crashed", "died"]):
+            if any(
+                term in text_lower
+                for term in ["oomkilled", "exitcode", "container exited", "container stopped", "crashed", "died"]
+            ):
                 crash_events.append(e)
                 if not crashed_svc:
                     crashed_svc = e.service
@@ -198,7 +203,7 @@ class RunbookEngine:
         evs = failed_events_by_svc[selected_svc]
         svc_cfg = self.service_map.get(selected_svc)
         target = selected_svc
-        action = "restart_service" if svc_cfg and svc_cfg.journal_unit else "rerun_healthcheck"
+        action = "restart_service" if svc_cfg and svc_cfg.journal_unit else None
         return CandidateCause(
             hypothesis=f"Root service {selected_svc} failed health check",
             service=selected_svc,
@@ -206,7 +211,7 @@ class RunbookEngine:
             evidence_event_ids=[e.id for e in evs],
             tier=DiagnosisTier.D2_RUNBOOK,
             proposed_action=action,
-            proposed_params={"target": target},
+            proposed_params={"target": target} if action else {},
             rationale=f"Health probe failure directly observed on dependency root {selected_svc}",
             blast_radius=1,
         )

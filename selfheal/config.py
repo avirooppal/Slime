@@ -102,6 +102,7 @@ class Config(StrictModel):
     learning_min_samples: int = Field(default=2, ge=1)
     learning_similarity_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
     learning_enabled: bool = True
+    learning_period: bool = Field(default=False, strict=True)
     cloud_enabled: bool = False
     cloud_base_url: str | None = None
     cloud_model: str = ""

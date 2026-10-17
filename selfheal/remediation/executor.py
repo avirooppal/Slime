@@ -62,7 +62,11 @@ class Executor:
             context = replace(context, incident_id=incident.id)
         decision = self.policy.authorize(raw, context)
         if not decision.allowed:
-            if decision.needs_human:
+            if decision.needs_human and decision.rule not in {
+                "approval_required",
+                "critical_approval_required",
+                "action_not_enabled_approval_required",
+            }:
                 self._transition(incident, State.ESCALATED, decision.rule)
             return ExecutionResult("refused", decision.rule, decision)
         assert (

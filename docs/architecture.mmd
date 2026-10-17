@@ -1,11 +1,11 @@
 flowchart LR
-  C[Configured collectors] --> E[SQLite events]
+  C["Configured collectors (logs, Docker logs, journald, metrics, health, changes)"] --> E[SQLite events]
   E --> R[Correlator and dependency graph]
   R --> D[D1 memory and D2 runbooks]
   D --> L[D3 local investigator]
   L --> O[D4 cloud optional and D5 Laya gated]
   O --> P[Planner]
-  P --> S[Deterministic safety policy]
+  P --> S["Deterministic safety policy (kill-switch first)"]
   S --> X[Typed executor]
   X --> V[Stability verifier]
   V --> A[Audit, learning and postmortem]

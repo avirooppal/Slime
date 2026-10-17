@@ -35,7 +35,13 @@ class SQLitePersistence(PersistenceHandler):
 class Templates:
     """Mine logs and detect new templates and bounded frequency spikes."""
 
-    def __init__(self, store: Store, window_seconds: int = 60, spike_minimum: int = 20) -> None:
+    def __init__(
+        self,
+        store: Store,
+        window_seconds: int = 60,
+        spike_minimum: int = 20,
+        learning_period: bool = False,
+    ) -> None:
         """Configure explicit numeric masking and capped Drain3 clusters."""
         config = TemplateMinerConfig()
         config.profiling_enabled = False
@@ -45,6 +51,7 @@ class Templates:
         self.store = store
         self.window_seconds = window_seconds
         self.spike_minimum = spike_minimum
+        self.learning_period = learning_period
         self.hits: dict[tuple[str, str], deque[datetime]] = defaultdict(deque)
         self.alerted: dict[tuple[str, str], datetime] = {}
 
@@ -70,15 +77,17 @@ class Templates:
         recent = sum((event.timestamp - t).total_seconds() <= self.window_seconds for t in hits)
         previous = len(hits) - recent
         cooldown = self.alerted.get(key)
-        spike = recent >= self.spike_minimum and recent > 3 * max(previous, 1)
-        if not exists or (
+        min_spike = self.spike_minimum * 2 if self.learning_period else self.spike_minimum
+        spike = recent >= min_spike and recent > 3 * max(previous, 1)
+        is_new_alert = (not exists) and (not self.learning_period)
+        if is_new_alert or (
             spike
             and (
                 cooldown is None
                 or (event.timestamp - cooldown).total_seconds() > self.window_seconds
             )
         ):
-            reason = "new_template" if not exists else "template_frequency_spike"
+            reason = "new_template" if is_new_alert else "template_frequency_spike"
             alerts.append(
                 Event(
                     timestamp=event.timestamp,

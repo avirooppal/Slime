@@ -19,6 +19,7 @@ AVAILABLE READ-ONLY TOOLS:
 - diff_config (service: str, path: str)
 - http_probe (url: str)
 - dns_check (domain: str)
+- rerun_healthcheck (service: str)
 
 REGISTERED ACTIONS:
 - restart_container (target: str)
@@ -27,9 +28,7 @@ REGISTERED ACTIONS:
 - clear_tmp_files (target: str)
 - rotate_logs (target: str)
 - kill_runaway_process (target: str)
-- free_docker_space (target: str)
 - reload_nginx (target: str)
-- rerun_healthcheck (target: str)
 - rollback_to_previous_image (target: str, previous_image: str)
 
 STEP JSON SCHEMA:

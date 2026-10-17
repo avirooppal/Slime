@@ -5,10 +5,11 @@ From the repository root, activate the installed Slime environment, then:
 ```sh
 cd examples/playground
 python setup.py
-slime agent --once
-slime agent --no-dry-run --once
+selfheal run --config .slime/config.yaml --once
+selfheal enable-action restart_managed_process --config .slime/config.yaml
+selfheal run --config .slime/config.yaml --no-dry-run --once
 python check.py
-slime incidents --config .slime/config.yaml
+selfheal incidents --config .slime/config.yaml
 python check.py stop
 ```
 

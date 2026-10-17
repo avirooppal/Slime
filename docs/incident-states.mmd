@@ -1,6 +1,7 @@
 stateDiagram-v2
     [*] --> open
     open --> investigating: evidence collected
+    investigating --> investigating: paused awaiting human approval
     investigating --> mitigating: safety gate authorizes
     mitigating --> verifying: typed action completed
     verifying --> resolved: full stability window passed

@@ -170,7 +170,7 @@ class CloudInvestigator:
             content = response.json()["choices"][0]["message"]["content"]
             parsed = CloudDiagnosisResponse.model_validate_json(content)
             target = aliases.get(parsed.target_service)
-            allowed = {"restart_container", "restart_service", "reload_nginx", "rerun_healthcheck"}
+            allowed = {"restart_container", "restart_service", "reload_nginx"}
             if target is None or parsed.proposed_action not in allowed:
                 raise ValueError("unrecognized target alias or action")
             action_target = ("container." if parsed.proposed_action == "restart_container"

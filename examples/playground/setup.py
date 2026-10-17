@@ -33,4 +33,4 @@ else:
         yaml.safe_dump(config.model_dump(mode="json"), stream, sort_keys=False)
     print("Prepared. The app is intentionally stopped; Slime can detect and start it.")
 print("Config: " + str(destination))
-print("Run slime agent --once from: " + str(root))
+print("Run selfheal run --config .slime/config.yaml --once from: " + str(root))

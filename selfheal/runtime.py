@@ -49,10 +49,14 @@ class Monitor:
 
     def __init__(self, config: Config, store: Store | None = None) -> None:
         """Initialize the local store and independently available collectors."""
+        import importlib.util
+
+        from selfheal.collectors.docker_logs import DockerLogs
+
         self.config = config
         self.store = store or Store(config.database)
-        self.templates = Templates(self.store)
-        self.anomalies = Anomalies()
+        self.templates = Templates(self.store, learning_period=config.learning_period)
+        self.anomalies = Anomalies(learning_period=config.learning_period)
         self.correlator = Correlator(config, self.store)
         self.managed_processes = ManagedProcessSupervisor(self.store)
         self.warnings = Warnings()
@@ -62,6 +66,7 @@ class Monitor:
         services = list(config.services)
         if not any(s.name == "host" for s in services):
             services.append(Service(name="host"))
+        has_docker = importlib.util.find_spec("docker") is not None
         for service in services:
             self.collectors += [
                 (f"health:{service.name}", Health(service)),
@@ -75,6 +80,13 @@ class Monitor:
             for path in service.logs:
                 self.collectors.append(
                     (f"file:{service.name}:{path}", LogTailer(path, service.name, self.store))
+                )
+            if service.container_name and has_docker:
+                self.collectors.append(
+                    (
+                        f"docker_logs:{service.name}",
+                        DockerLogs(service.container_name, service.name, self.store),
+                    )
                 )
             if service.journal_unit:
                 try:

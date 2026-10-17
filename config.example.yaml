@@ -19,6 +19,7 @@ cloud_max_output_tokens: 256
 laya_enabled: false
 laya_eval_report: null # path to held-out selfheal eval report
 laya_required_accuracy_margin: null # operator-set improvement over local baseline
+learning_period: false # set true during Days 1-7 to build baselines with lower alerting
 maintenance: []
 safety:
   minimum_confidence: 0.90
@@ -27,6 +28,7 @@ safety:
   failure_limit: 3
   verification_interval_seconds: 5
   verification_timeout_seconds: 300
+  enabled_actions: [] # nothing auto-runs until `selfheal enable-action <actions...>`
 managed_files: [] # POSIX only; exact files, no recursive cleanup
 docker_images: {} # cleanup alias -> exact sha256 digest; requires approval
 services: []

@@ -76,3 +76,4 @@ class SafetySettings(StrictModel):
     failure_limit: int = Field(default=3, ge=1, strict=True)
     verification_interval_seconds: float = Field(default=5, gt=0, le=30)
     verification_timeout_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
+    enabled_actions: list[str] = Field(default_factory=list)

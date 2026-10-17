@@ -50,7 +50,7 @@ class Event(StrictModel):
     severity: str = "info"
     evidence: str = Field(default="", max_length=4096)
     template_id: str | None = None
-    attributes: dict[str, str | float | bool | int | None] = Field(default_factory=dict)
+    attributes: dict[str, bool | int | float | str | None] = Field(default_factory=dict)
 
     @field_validator("timestamp")
     @classmethod

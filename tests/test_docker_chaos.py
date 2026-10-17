@@ -66,3 +66,61 @@ def test_docker_demo_refuses_unlabeled_or_arbitrary_target(tmp_path: Path) -> No
     with pytest.raises(ValueError, match="only worker stop or web outage"):
         harness.inject(arbitrary)
     assert adapter.container.call_count == 1
+
+
+def test_docker_demo_live_daemon_chaos_and_repair(tmp_path: Path) -> None:
+    """Exercise DockerDemoHarness and real NativeBackend restart_container when slime-demo stack is running."""
+    from selfheal.config import Config, Service
+    from selfheal.remediation.docker_adapter import DockerAdapter
+    from selfheal.runtime import Coordinator
+    from selfheal.safety.contracts import SafetySettings
+
+    adapter = DockerAdapter()
+    try:
+        worker_cnt = adapter.container("slime-demo-worker-1")
+    except Exception:  # noqa: BLE001
+        pytest.skip("requires live Docker daemon with running slime-demo stack")
+
+    if worker_cnt.status != "running":
+        worker_cnt.start()
+        worker_cnt.reload()
+
+    cfg = Config(
+        database=str(tmp_path / "live_docker.db"),
+        dry_run=False,
+        metrics_enabled=False,
+        stability_seconds=2,
+        safety=SafetySettings(
+            enabled_actions=["restart_container"],
+            verification_interval_seconds=1,
+            verification_timeout_seconds=15,
+        ),
+        services=[
+            Service(
+                name="worker",
+                container_name="slime-demo-worker-1",
+                http_url="http://127.0.0.1:18081/",
+            ),
+            Service(
+                name="web",
+                container_name="slime-demo-web-1",
+                http_url="http://127.0.0.1:18080/",
+            ),
+        ],
+    )
+    coord = Coordinator(cfg)
+    try:
+        harness = DockerDemoHarness(tmp_path / "chaos_ws", coord, docker=adapter)
+        outcome = harness.run_experiment(demo_scenarios()[0])
+        assert outcome.detected is True
+        assert outcome.diagnosed_root == "worker"
+        assert outcome.planned_action == "restart_container"
+        assert outcome.policy_allowed is True
+        assert outcome.policy_rule == "stability_passed"
+        assert outcome.executed is True
+        assert outcome.verified_stable is True
+        assert outcome.postmortem_generated is True
+        repaired = adapter.container("slime-demo-worker-1")
+        assert repaired.status == "running"
+    finally:
+        coord.close()

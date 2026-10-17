@@ -14,13 +14,12 @@ from selfheal.verifier.stability import StabilityVerifier
     "name",
     [
         "restart_container",
+        "restart_managed_process",
         "restart_service",
         "clear_tmp_files",
         "rotate_logs",
         "kill_runaway_process",
-        "free_docker_space",
         "reload_nginx",
-        "rerun_healthcheck",
         "rollback_to_previous_image",
     ],
 )

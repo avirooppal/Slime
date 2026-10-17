@@ -233,3 +233,21 @@ def test_duplicate_merge(store: Store) -> None:
     assert incident.services == ["a", "b", "db"]
     assert len(incident.event_ids) == 3
     assert sum(i.state == State.ESCALATED for i in correlator.incidents) == 1
+
+
+def test_learning_period_suppresses_early_noise(store: Store) -> None:
+    """During learning_period, new log templates build baselines without alerting, while hard disk limits still alert."""
+    miner = Templates(store, window_seconds=10, spike_minimum=5, learning_period=True)
+    mined, alerts = miner.process(
+        Event(kind=Kind.LOG, service="web", source="file", evidence="novel startup message 42")
+    )
+    assert alerts == []
+    assert mined.template_id is not None
+
+    detector = Anomalies(learning_period=True)
+    for _ in range(12):
+        assert detector.sample("cpu", 10) is None
+    # Moderate z-score outlier (7.5) is suppressed during learning_period (threshold 9.0)
+    assert detector.sample("cpu", 17.5) is None
+    # Hard limit (>90%) still alerts immediately
+    assert detector.sample("disk", 92, hard_limit=90) == "hard_limit"

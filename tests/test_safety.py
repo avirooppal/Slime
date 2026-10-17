@@ -17,15 +17,34 @@ from selfheal.storage.store import Store
 def test_registry_is_closed_and_typed() -> None:
     """All requested actions exist with immutable conservative metadata."""
     registry = default_registry()
-    assert len(registry.actions) == 10
+    assert len(registry.actions) == 8
     assert registry.get("restart_managed_process").risk == Risk.SAFE
     assert registry.get("restart_service").risk == Risk.APPROVAL
-    assert registry.get("free_docker_space").risk == Risk.APPROVAL
     assert registry.get("rotate_logs").risk == Risk.SAFE
+    with pytest.raises(LookupError):
+        registry.get("free_docker_space")
+    with pytest.raises(LookupError):
+        registry.get("rerun_healthcheck")
     with pytest.raises(TypeError):
         registry.actions["shell"] = registry.get("restart_service")
     with pytest.raises(ValueError):
         ActionRegistry([registry.get("restart_service")] * 2)
+
+
+def test_default_enabled_actions_empty_blocks_auto_execution() -> None:
+    """Default SafetySettings().enabled_actions is [] so nothing auto-runs until enabled."""
+    store = Store(":memory:")
+    inventory, backend = FakeInventory(), FakeBackend()
+    state = SafetyState(store)
+    default_settings = SafetySettings()
+    assert default_settings.enabled_actions == []
+    policy = Policy(default_registry(), inventory, backend, state, default_settings, dry_run=False)
+    raw = proposal(inventory, "restart_container")
+    decision = policy.authorize(raw)
+    assert not decision.allowed
+    assert decision.rule == "action_not_enabled_approval_required"
+    assert decision.needs_human
+    store.close()
 
 
 def test_dry_run_and_no_advisory_execution(rig: Rig) -> None:
@@ -186,7 +205,8 @@ def test_kill_switch_and_interrupted_attempt_persist(tmp_path: Path) -> None:
     store = Store(path)
     inventory, backend = FakeInventory(), FakeBackend()
     state = SafetyState(store)
-    policy = Policy(default_registry(), inventory, backend, state, SafetySettings(), dry_run=False)
+    settings = SafetySettings(enabled_actions=["restart_container"])
+    policy = Policy(default_registry(), inventory, backend, state, settings, dry_run=False)
     state.kill_switch(True, "operator")
     assert policy.authorize(proposal(inventory)).rule == "kill_switch"
     store.close()
@@ -273,7 +293,7 @@ def test_concurrent_reservation_serialized(tmp_path: Path) -> None:
             inventory,
             backend,
             SafetyState(store),
-            SafetySettings(),
+            SafetySettings(enabled_actions=["restart_container"]),
             dry_run=False,
         )
         for store in stores
@@ -282,3 +302,158 @@ def test_concurrent_reservation_serialized(tmp_path: Path) -> None:
     assert policies[1].authorize(proposal(inventory)).rule == "circuit_breaker"
     for store in stores:
         store.close()
+
+
+def test_kill_switch_is_first_gate(rig: Rig) -> None:
+    """A killed system records kill_switch first even when proposal has low confidence or unknown action."""
+    policy, inventory, _, _ = rig
+    policy.state.kill_switch(True, "operator")
+    bad_proposal = {
+        **proposal(inventory).model_dump(),
+        "confidence": 0.10,
+        "name": "unknown_action_xyz",
+    }
+    decision = policy.authorize(bad_proposal, DiagnosisContext(status="timeout", flapping=True))
+    assert not decision.allowed
+    assert decision.rule == "kill_switch"
+    last_rule = policy.state.store.connection.execute(
+        "SELECT rule FROM audit_log WHERE subject='policy' ORDER BY id DESC LIMIT 1"
+    ).fetchone()[0]
+    assert last_rule == "kill_switch"
+
+
+def test_refusal_reason_matrix_all_audit_logged(tmp_path: Path) -> None:
+    """Verify every required refusal reason is refused AND audit-logged with the exact rule."""
+    from safety_fakes import FakeClock
+
+    clock = FakeClock()
+    store = Store(tmp_path / "matrix.db")
+    inventory = FakeInventory()
+    backend = FakeBackend()
+    actions = list(default_registry().actions.values()) + [
+        Action(
+            name="drop_database",
+            schema=TargetParams,
+            risk=Risk.FORBIDDEN,
+            target_kinds=frozenset({"container"}),
+            blast_radius=1,
+            cooldown_seconds=300,
+        )
+    ]
+    registry = ActionRegistry(actions)
+    state = SafetyState(store, now=clock.now)
+    policy = Policy(
+        registry,
+        inventory,
+        backend,
+        state,
+        SafetySettings(enabled_actions=["restart_container"]),
+        dry_run=False,
+    )
+
+    def assert_refused_and_logged(
+        raw: object,
+        expected_rule: str,
+        ctx: DiagnosisContext | None = None,
+    ) -> None:
+        dec = policy.authorize(raw, ctx)
+        assert not dec.allowed, f"Expected {expected_rule} to be refused"
+        assert dec.rule == expected_rule
+        logged = store.connection.execute(
+            "SELECT rule FROM audit_log WHERE subject='policy' ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+        assert logged == expected_rule
+
+    # 1. unknown action
+    assert_refused_and_logged(
+        {**proposal(inventory).model_dump(), "name": "nonexistent_action"},
+        "unknown_action",
+    )
+    # 2. forbidden action
+    assert_refused_and_logged(
+        proposal(inventory, name="drop_database"),
+        "forbidden_action",
+    )
+    # 3. shell-command-looking parameter
+    assert_refused_and_logged(
+        {
+            **proposal(inventory).model_dump(),
+            "params": {"target": "container.worker; rm -rf /"},
+        },
+        "invalid_parameters",
+    )
+    # 4. target not in inventory
+    assert_refused_and_logged(
+        {
+            **proposal(inventory).model_dump(),
+            "params": {"target": "container.unconfigured"},
+        },
+        "unknown_target",
+    )
+    # 5. state changed since diagnosis
+    assert_refused_and_logged(
+        proposal(inventory).model_copy(update={"expected_revision": "stale-revision-000"}),
+        "state_changed_rediagnose",
+    )
+    # 6. low confidence
+    assert_refused_and_logged(
+        proposal(inventory).model_copy(update={"confidence": 0.45}),
+        "low_confidence",
+    )
+    # 7. invalid/timed-out model output
+    assert_refused_and_logged(
+        proposal(inventory),
+        "unreliable_diagnosis",
+        DiagnosisContext(status="timeout"),
+    )
+    # 8. flapping incident
+    assert_refused_and_logged(
+        proposal(inventory),
+        "flapping_incident",
+        DiagnosisContext(flapping=True),
+    )
+    # 9. critical service
+    orig_live = inventory.live
+    inventory.live = replace(orig_live, critical=True)
+    assert_refused_and_logged(
+        proposal(inventory),
+        "critical_approval_required",
+    )
+    inventory.live = orig_live
+    # 10. dry-run
+    policy.dry_run = True
+    assert_refused_and_logged(
+        proposal(inventory),
+        "dry_run",
+    )
+    policy.dry_run = False
+    # 11. cooldown
+    first_ok = policy.authorize(proposal(inventory))
+    assert first_ok.allowed and first_ok.action_id is not None
+    state.finish(first_ok.action_id, False, 100)
+    assert_refused_and_logged(
+        proposal(inventory),
+        "cooldown",
+    )
+    # 12. hourly limit (consume remaining 4 of 5 hourly slots)
+    for _ in range(4):
+        clock.wait(301)
+        ok_dec = policy.authorize(proposal(inventory))
+        assert ok_dec.allowed and ok_dec.action_id is not None
+        state.finish(ok_dec.action_id, False, 100)
+    clock.wait(301)
+    assert_refused_and_logged(
+        proposal(inventory),
+        "hourly_limit",
+    )
+    # 13. open circuit breaker (advance past 1h window, then fail with failure_limit=3)
+    clock.wait(3601)
+    fail_dec = policy.authorize(proposal(inventory))
+    assert fail_dec.allowed and fail_dec.action_id is not None
+    state.finish(fail_dec.action_id, False, 3)
+    clock.wait(301)
+    assert_refused_and_logged(
+        proposal(inventory),
+        "circuit_breaker",
+    )
+    store.close()

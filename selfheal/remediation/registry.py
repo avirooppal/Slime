@@ -27,7 +27,7 @@ class ActionRegistry:
 
 
 def default_registry() -> ActionRegistry:
-    """Declare requested actions plus owned-process recovery with fixed risk tiers."""
+    """Declare mutation actions plus owned-process recovery with fixed risk tiers."""
     definitions = [
         ("restart_container", Risk.SAFE, "container"),
         ("restart_managed_process", Risk.SAFE, "managed_process"),
@@ -35,9 +35,7 @@ def default_registry() -> ActionRegistry:
         ("clear_tmp_files", Risk.SAFE, "tmp_file"),
         ("rotate_logs", Risk.SAFE, "log_file"),
         ("kill_runaway_process", Risk.APPROVAL, "process"),
-        ("free_docker_space", Risk.APPROVAL, "docker_image"),
         ("reload_nginx", Risk.APPROVAL, "service"),
-        ("rerun_healthcheck", Risk.SAFE, "service"),
         ("rollback_to_previous_image", Risk.APPROVAL, "container"),
     ]
     return ActionRegistry(

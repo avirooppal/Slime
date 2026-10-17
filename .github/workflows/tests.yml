@@ -1,4 +1,4 @@
-name: Phase 1 checks
+name: CI checks
 on: [push, pull_request]
 jobs:
   test:
@@ -13,8 +13,24 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -e ".[dev,docker,dashboard]"
+      - name: Start disposable Docker Compose demo stack (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          docker compose up -d
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/ >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
       - run: python -m pytest -q -ra
       - run: python -m ruff check selfheal tests
       - run: python -m mypy selfheal --ignore-missing-imports
       - run: python -m pip check
+      - name: Run Linux Docker trial script (Linux)
+        if: runner.os == 'Linux'
+        run: bash scripts/linux_trial.sh
+      - name: Stop disposable Docker Compose demo stack (Linux)
+        if: always() && runner.os == 'Linux'
+        run: docker compose down -v --remove-orphans

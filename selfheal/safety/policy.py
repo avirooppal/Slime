@@ -53,12 +53,28 @@ class Policy:
         )
 
     def _check(self, raw: object, context: DiagnosisContext) -> Decision:
-        """Return the first deterministic rejecting rule, after a fresh live probe."""
+        """Return the first deterministic rejecting rule (kill_switch first), after a fresh live probe.
+
+        Gate order:
+        1. kill_switch
+        2. invalid_proposal / incident_mismatch
+        3. unknown_action / forbidden_action / invalid_parameters
+        4. unreliable_diagnosis / budget_exhausted / flapping_incident / low_confidence
+        5. circuit_breaker
+        6. live_snapshot (unknown_target / inventory_unavailable / target_kind_mismatch / state_changed_rediagnose)
+        7. human approval (critical_approval_required / action_not_enabled_approval_required / approval_required)
+        8. blast_radius
+        9. dry_run
+        10. cooldown / hourly_limit
+        11. preconditions_failed
+        """
 
         def refuse(rule: str, human: bool = False) -> Decision:
             """Provide a bounded reason without echoing untrusted raw input."""
             return Decision(False, rule, human)
 
+        if self.state.killed():
+            return refuse("kill_switch")
         try:
             proposal = Proposal.model_validate(raw).model_copy(deep=True)
         except (ValidationError, ValueError, TypeError):
@@ -83,8 +99,6 @@ class Policy:
             return refuse("flapping_incident", True)
         if proposal.confidence < self.settings.minimum_confidence:
             return refuse("low_confidence", True)
-        if self.state.killed():
-            return refuse("kill_switch")
         if self.state.circuit_open():
             return refuse("circuit_breaker", True)
         try:
@@ -100,16 +114,19 @@ class Policy:
         if snapshot.revision != proposal.expected_revision:
             return refuse("state_changed_rediagnose", True)
         approved = self.state.approved(proposal)
-        needs_approval = action.risk == Risk.APPROVAL or snapshot.critical
-        if needs_approval and not approved:
+        action_not_enabled = action.name not in self.settings.enabled_actions
+        needs_approval = action.risk == Risk.APPROVAL or snapshot.critical or action_not_enabled
+        if (action.risk == Risk.APPROVAL or snapshot.critical) and not approved:
             return refuse(
                 "critical_approval_required" if snapshot.critical else "approval_required", True
             )
         radius = max(action.blast_radius, snapshot.blast_radius)
-        if radius < 1 or (not needs_approval and radius > self.max_auto_targets):
+        if radius < 1 or (not (action.risk == Risk.APPROVAL or snapshot.critical or approved) and radius > self.max_auto_targets):
             return refuse("blast_radius", True)
         if self.dry_run:
             return refuse("dry_run")
+        if action_not_enabled and not approved:
+            return refuse("action_not_enabled_approval_required", True)
         if self.state.cooling_down(
             action.name, params.target, max(action.cooldown_seconds, self.settings.cooldown_seconds)
         ):
@@ -145,7 +162,12 @@ class Policy:
                     return decision
                 assert decision.proposal is not None and decision.snapshot is not None
                 action = self.registry.get(decision.proposal.name)
-                automatic = action.risk == Risk.SAFE and not decision.snapshot.critical
+                action_enabled = action.name in self.settings.enabled_actions
+                automatic = (
+                    action.risk == Risk.SAFE
+                    and not decision.snapshot.critical
+                    and action_enabled
+                )
                 action_id = self.state.reserve(
                     decision.proposal, decision.snapshot.target, automatic
                 )

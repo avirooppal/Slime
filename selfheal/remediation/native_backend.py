@@ -1,6 +1,7 @@
 """Bounded concrete platform actions; unsafe deployment reconstruction is refused."""
 
 import shutil
+import time
 from collections.abc import Callable
 
 import psutil
@@ -55,8 +56,6 @@ class NativeBackend:
         return name in {
             "restart_container",
             "kill_runaway_process",
-            "free_docker_space",
-            "rerun_healthcheck",
         }
 
     def execute(
@@ -87,6 +86,14 @@ class NativeBackend:
                 raise RuntimeError("container identity changed")
             self.guard(stopped)
             container.restart(timeout=2)
+            container.reload()
+            if container.attrs.get("State", {}).get("Status") == "running":
+                deadline = time.monotonic() + 3.0
+                while time.monotonic() < deadline:
+                    self.guard(stopped)
+                    if self.inventory.snapshot(params.target).healthy:
+                        break
+                    time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
         elif name == "restart_managed_process":
             service = self.inventory.services[params.target]
             supervisor = self.inventory.supervisor
@@ -120,17 +127,6 @@ class NativeBackend:
                 raise RuntimeError("PID was reused")
             self.guard(stopped)
             process.terminate()
-        elif name == "free_docker_space":
-            if not self.reader.call(
-                lambda: self.inventory.docker.dangling(snapshot.identity), 3, stopped
-            ):
-                raise RuntimeError("image is no longer dangling")
-            self.guard(stopped)
-            self.inventory.docker.client().images.remove(
-                snapshot.identity, force=False, noprune=True
-            )
-        elif name == "rerun_healthcheck":
-            return Receipt("read-only configured health check requested", changed=False)
         else:
             raise RuntimeError("native action unavailable; use a deployment-specific typed adapter")
         return Receipt("typed native action dispatched; stability verification still required")
@@ -147,15 +143,6 @@ class NativeBackend:
                 return f"{process.pid}:{process.create_time()}" != snapshot.identity
             except psutil.NoSuchProcess:
                 return True
-        if name == "free_docker_space":
-            # A missing exact image is success; daemon/network failures are not.
-            try:
-                self.inventory.docker.image(snapshot.identity)
-            except Exception as error:
-                if type(error).__name__ == "ImageNotFound":
-                    return True
-                raise
-            return False
         if name == "restart_managed_process":
             supervisor = self.inventory.supervisor
             if supervisor is None:

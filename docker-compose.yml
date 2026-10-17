@@ -10,7 +10,10 @@ services:
   worker:
     image: python:3.12-alpine
     labels: {org.slime.demo: "v1"}
-    command: ["python", "-c", "import time; time.sleep(86400)"]
+    command: ["python", "-m", "http.server", "8000", "--directory", "/site"]
+    ports: ["127.0.0.1:18081:8000"]
+    volumes:
+      - ./docs/demo:/site:ro
     networks: [demo]
   nginx:
     image: nginx:1.27-alpine

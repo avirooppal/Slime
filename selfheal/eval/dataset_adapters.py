@@ -57,7 +57,7 @@ class LocalCatalogAdapter(DatasetAdapter):
         return scenarios
 
     def documentation(self) -> str:
-        return "Built-in synthetic and adversarial failure scenario catalog; 100% locally reproducible."
+        return "Built-in 7-case smoke test (5 synthetic fault scenarios + 2 adversarial non-incident log scenarios); 100% locally reproducible."
 
 
 class TrainTicketAdapter(DatasetAdapter):

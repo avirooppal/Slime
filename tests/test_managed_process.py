@@ -12,6 +12,7 @@ from selfheal.config import Config, ManagedProcessSettings, Service
 from selfheal.models import State
 from selfheal.remediation.managed_process import ManagedProcessSupervisor
 from selfheal.runtime import Coordinator
+from selfheal.safety.contracts import SafetySettings
 from selfheal.storage.store import Store
 
 
@@ -20,6 +21,7 @@ def _config(tmp_path: Path, dry_run: bool) -> Config:
     return Config(
         database=str(tmp_path / "slime.db"), dry_run=dry_run,
         metrics_enabled=False, stability_seconds=1,
+        safety=SafetySettings(enabled_actions=["restart_managed_process"]),
         services=[Service(
             name="test_worker",
             managed_process=ManagedProcessSettings(
@@ -110,7 +112,9 @@ def test_managed_process_waits_for_http_readiness_and_stability(tmp_path: Path) 
     )
     config = Config(
         database=str(tmp_path / "http.db"), dry_run=False,
-        metrics_enabled=False, stability_seconds=1, services=[service],
+        metrics_enabled=False, stability_seconds=1,
+        safety=SafetySettings(enabled_actions=["restart_managed_process"]),
+        services=[service],
     )
     coordinator = Coordinator(config)
     owned_pid: int | None = None

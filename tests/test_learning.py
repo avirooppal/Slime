@@ -306,6 +306,8 @@ def test_context_shift_forces_full_diagnosis(tmp_path: Path) -> None:
 
 def test_coordinator_learning_lifecycle_and_shortening(tmp_path: Path) -> None:
     """Coordinator enforces full diagnosis under sample threshold, then shortens on repeated incidents."""
+    from selfheal.safety.contracts import SafetySettings
+
     db_path = tmp_path / "slime.db"
     config = Config(
         database=str(db_path),
@@ -314,6 +316,7 @@ def test_coordinator_learning_lifecycle_and_shortening(tmp_path: Path) -> None:
         stability_seconds=10,
         learning_min_samples=2,
         learning_similarity_threshold=0.85,
+        safety=SafetySettings(enabled_actions=["restart_container"]),
     )
     store = Store(db_path)
     inv = FakeInventory()

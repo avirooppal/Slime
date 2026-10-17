@@ -29,9 +29,10 @@ class EchoDiagnostic:
 
 
 def test_registry_separate_from_actions() -> None:
-    """No remediation name can dispatch through read-only diagnostics."""
+    """No remediation name can dispatch through read-only diagnostics; rerun_healthcheck is a read-only tool."""
     registry = tool_registry()
-    assert len(registry) == 9 and "restart_container" not in registry
+    assert len(registry) == 10 and "restart_container" not in registry
+    assert "rerun_healthcheck" in registry
     store = Store(":memory:")
     runner = ToolRunner(EchoDiagnostic("unused"), store)
     assert runner.call("restart_container", {"target": "container.worker"}).status == "refused"
@@ -39,6 +40,30 @@ def test_registry_separate_from_actions() -> None:
         runner.call("tail_logs", {"service": "worker", "command": "rm -rf /"}).status == "refused"
     )
     assert runner.call("tail_logs", {"service": "worker", "n": 201}).status == "refused"
+    store.close()
+
+
+def test_rerun_healthcheck_readonly_uses_no_cooldown_or_budget() -> None:
+    """rerun_healthcheck executes as a read-only diagnostic and consumes no cooldown or hourly budget."""
+    from selfheal.safety.state import SafetyState
+
+    store = Store(":memory:")
+    state = SafetyState(store)
+    config = Config(services=[Service(name="api", http_url="http://127.0.0.1:9999/health")])
+    inventory = NativeInventory(config)
+    diagnostics = NativeDiagnostics(inventory)
+    runner = ToolRunner(diagnostics, store)
+
+    res1 = runner.call("rerun_healthcheck", {"service": "api"})
+    res2 = runner.call("rerun_healthcheck", {"service": "api"})
+    assert res1.status == "ok"
+    assert res2.status == "ok"
+    parsed = json.loads(res1.data)
+    assert parsed["service"] == "api"
+    assert "healthy" in parsed
+    assert state.recent_count() == 0
+    assert not state.cooling_down("rerun_healthcheck", "api", 300)
+    assert runner.call("rerun_healthcheck", {"service": "unconfigured"}).status == "refused"
     store.close()
 
 

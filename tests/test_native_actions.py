@@ -69,19 +69,19 @@ def test_docker_missing_warns_once(monkeypatch: pytest.MonkeyPatch) -> None:
         adapter.client()
 
 
-def test_docker_prune_one_exact_image() -> None:
-    """The space action removes one dangling immutable image without broad prune or force."""
+def test_free_docker_space_removed_from_native_backend() -> None:
+    """free_docker_space is removed from the registry and rejected by NativeBackend."""
     image_id = "sha256:" + "a" * 64
     docker = Mock()
     docker.image.return_value = Mock(id=image_id)
     docker.dangling.return_value = True
     inventory = NativeInventory(Config(docker_images={"dangling.example": image_id}), docker=docker)
     snapshot = inventory.snapshot("dangling.example")
-    NativeBackend(inventory).execute(
-        "free_docker_space", snapshot, TargetParams(target="dangling.example")
-    )
-    docker.client().images.remove.assert_called_once_with(image_id, force=False, noprune=True)
-    docker.client().images.prune.assert_not_called()
+    backend = NativeBackend(inventory)
+    assert not backend.available("free_docker_space", snapshot, TargetParams(target="dangling.example"))
+    with pytest.raises(RuntimeError, match="native preconditions no longer hold"):
+        backend.execute("free_docker_space", snapshot, TargetParams(target="dangling.example"))
+    docker.client.assert_not_called()
 
 
 def test_service_commands_are_argument_lists(monkeypatch: pytest.MonkeyPatch) -> None:

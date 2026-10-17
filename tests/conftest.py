@@ -18,6 +18,9 @@ def rig() -> Iterator[Rig]:
     store = Store(":memory:")
     clock, inventory, backend = FakeClock(), FakeInventory(), FakeBackend()
     state = SafetyState(store, clock.now)
-    policy = Policy(default_registry(), inventory, backend, state, SafetySettings(), dry_run=False)
+    settings = SafetySettings(
+        enabled_actions=["restart_container", "restart_managed_process", "clear_tmp_files", "rotate_logs"]
+    )
+    policy = Policy(default_registry(), inventory, backend, state, settings, dry_run=False)
     yield policy, inventory, backend, clock
     store.close()

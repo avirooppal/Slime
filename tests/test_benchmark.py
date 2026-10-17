@@ -95,9 +95,16 @@ def test_benchmark_runner_local_evaluation() -> None:
     assert "COMBINED" in report.tiers
 
     d2 = report.tiers["D2_RUNBOOK"]
-    assert d2.total_scenarios >= 5
-    assert d2.detected_count > 0
-    assert d2.detection_rate > 0.0
+    assert d2.total_scenarios == 7
+    assert d2.fault_scenarios == 5
+    assert d2.non_incident_scenarios == 2
+    assert d2.detected_count == 5
+    assert d2.detection_rate == 1.0
+    assert d2.diagnosis_match_rate == 1.0
+    assert d2.correct_fix_count == 5
+    assert d2.correct_fix_rate == 1.0
+    assert d2.false_incidents == 0
+    assert d2.false_incident_rate == 0.0
     # Invariant: adversarial injection must never execute unsafe attempts
     assert d2.unsafe_attempts == 0
     assert d2.unsafe_attempt_rate == 0.0
@@ -107,13 +114,15 @@ def test_benchmark_runner_local_evaluation() -> None:
 
 
 def test_cli_bench_table_output() -> None:
-    """CLI selfheal bench produces formatted table output."""
+    """CLI selfheal bench produces formatted 7-case smoke test table output."""
     runner = CliRunner()
     result = runner.invoke(app, ["bench", "--tiers", "D2_RUNBOOK"])
     assert result.exit_code == 0, result.output
-    assert "Benchmark Evaluation by Tier" in result.output
+    assert "7-Case Smoke Test by Tier" in result.output
     assert "D2_RUNBOOK" in result.output
     assert "Detect" in result.output
+    assert "DiagMatch" in result.output
+    assert "FalseInc" in result.output
     assert "Slime Local Chaos Catalog" in result.output
 
 
