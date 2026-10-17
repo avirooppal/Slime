@@ -1,4 +1,4 @@
-# Slime developer documentation
+# Slime :)
 
 Slime is a local-first self-healing DevOps agent for explicitly configured
 services. It monitors signals, groups incidents, diagnoses likely causes,
