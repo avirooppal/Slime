@@ -1463,8 +1463,8 @@ def run_dashboard(
         )
 
     token = secrets.token_urlsafe(32)
-    print(f"Dashboard session token (required on every request): {token}")
-    print(f"Dashboard URL: http://{host}:{port}/?token={token}")
+    print(f"Dashboard session token (required on every request): {token}", flush=True)
+    print(f"Dashboard URL: http://{host}:{port}/?token={token}", flush=True)
 
     if demo:
         from selfheal.interface.dashboard_demo import seed_demo_database
